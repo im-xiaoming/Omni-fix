@@ -25,29 +25,29 @@ the paper.
 
 The released artifacts live on the Hugging Face Hub:
 
-| Artifact | Hub ID | Status |
-| --- | --- | --- |
-| OmniRetriever-7B LoRA adapter | [`YunzeLiu/OmniRetriever-7B`](https://huggingface.co/YunzeLiu/OmniRetriever-7B) | **Released** |
+| Artifact                                | Hub ID                                                                                         | Status       |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------ |
+| OmniRetriever-7B LoRA adapter           | [`YunzeLiu/OmniRetriever-7B`](https://huggingface.co/YunzeLiu/OmniRetriever-7B)                | **Released** |
 | OmniRetriever-Bench (3,782 AVT triples) | [`YunzeLiu/OmniRetriever-Bench`](https://huggingface.co/datasets/YunzeLiu/OmniRetriever-Bench) | **Released** |
 
 ---
 
 ## Headline numbers (paper Table 1)
 
-| Model | AVG-single | AVG-dual | **AVG-all R@1** |
-| --- | ---: | ---: | ---: |
-| WAVE-7B (frozen)           | 19.27 | 31.37 | 25.32 |
-| Omni-Embed-Nemotron (open) | 21.79 | 31.84 | 26.81 |
-| Gemini Embedding 2 (closed)| 25.44 | 40.80 | 33.12 |
-| **OmniRetriever-7B (ours)**| **28.63** | **41.05** | **34.84** |
+| Model                       | AVG-single |  AVG-dual | **AVG-all R@1** |
+| --------------------------- | ---------: | --------: | --------------: |
+| WAVE-7B (frozen)            |      19.27 |     31.37 |           25.32 |
+| Omni-Embed-Nemotron (open)  |      21.79 |     31.84 |           26.81 |
+| Gemini Embedding 2 (closed) |      25.44 |     40.80 |           33.12 |
+| **OmniRetriever-7B (ours)** |  **28.63** | **41.05** |       **34.84** |
 
 ### Audio benchmarks (paper Table 2)
 
-| Model | Clotho T→A | Clotho A→T | SoundDescs T→A | SoundDescs A→T |
-| --- | ---: | ---: | ---: | ---: |
-| Omni-Embed-Nemotron (open) | 6.4 | 3.5 | 6.4 | 4.8 |
-| Gemini Embedding 2 (closed)| 5.2 | 1.3 | 7.0 | 7.4 |
-| **OmniRetriever-7B (ours)**| **19.1** | **16.1** | **25.0** | **20.7** |
+| Model                       | Clotho T→A | Clotho A→T | SoundDescs T→A | SoundDescs A→T |
+| --------------------------- | ---------: | ---------: | -------------: | -------------: |
+| Omni-Embed-Nemotron (open)  |        6.4 |        3.5 |            6.4 |            4.8 |
+| Gemini Embedding 2 (closed) |        5.2 |        1.3 |            7.0 |            7.4 |
+| **OmniRetriever-7B (ours)** |   **19.1** |   **16.1** |       **25.0** |       **20.7** |
 
 OmniRetriever beats Gemini Embedding 2 by **+13.3 to +18.0 R@1** on every
 audio-text direction and enters the audio-text specialist SOTA band on
@@ -55,11 +55,11 @@ Clotho T→A.
 
 ### Video benchmarks (paper Table 3)
 
-| Model | MSR-VTT T→V | MSVD T→V | DiDeMo T→V | VATEX T→V |
-| --- | ---: | ---: | ---: | ---: |
-| Omni-Embed-Nemotron (open) | 35.8 | 55.8 | 41.9 | 47.5 |
-| Gemini Embedding 2 (closed)| **53.9** | **77.1** | **55.6** | **69.4** |
-| **OmniRetriever-7B (ours)**| 47.9 | 65.6 | 45.1 | 58.7 |
+| Model                       | MSR-VTT T→V | MSVD T→V | DiDeMo T→V | VATEX T→V |
+| --------------------------- | ----------: | -------: | ---------: | --------: |
+| Omni-Embed-Nemotron (open)  |        35.8 |     55.8 |       41.9 |      47.5 |
+| Gemini Embedding 2 (closed) |    **53.9** | **77.1** |   **55.6** |  **69.4** |
+| **OmniRetriever-7B (ours)** |        47.9 |     65.6 |       45.1 |      58.7 |
 
 ---
 
@@ -226,11 +226,11 @@ Model weights and the benchmark live on the Hugging Face Hub
 
 OmniRetriever optimises three losses on top of WAVE-7B:
 
-| Symbol | What it does |
-| --- | --- |
-| `L_A` | Standard pairwise InfoNCE between every modality pair (T-V, T-A, V-A). Kept as a stabiliser. |
-| `L_D` | **Fusion-as-teacher distillation** (the paper's main contribution). A stop-gradient copy of the joint `z_TVA` produced on the forward pass becomes a *teacher* for every single-modal sub-encoder. Teacher and students share the same backbone, so the audio sub-encoder inherits text–video neighbours that no unimodal teacher can supply. |
-| `L_T` | **Tuple-InfoNCE refinement.** Supervises `z_TVA` directly with *modality-cycled* hard negatives. The shuffled slot cycles deterministically through `{T, V, A}` so every modality remains discriminative inside the joint vector. |
+| Symbol | What it does                                                                                                                                                                                                                                                                                                                                  |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `L_A`  | Standard pairwise InfoNCE between every modality pair (T-V, T-A, V-A). Kept as a stabiliser.                                                                                                                                                                                                                                                  |
+| `L_D`  | **Fusion-as-teacher distillation** (the paper's main contribution). A stop-gradient copy of the joint `z_TVA` produced on the forward pass becomes a *teacher* for every single-modal sub-encoder. Teacher and students share the same backbone, so the audio sub-encoder inherits text–video neighbours that no unimodal teacher can supply. |
+| `L_T`  | **Tuple-InfoNCE refinement.** Supervises `z_TVA` directly with *modality-cycled* hard negatives. The shuffled slot cycles deterministically through `{T, V, A}` so every modality remains discriminative inside the joint vector.                                                                                                             |
 
 Final objective: `L_A + L_D + L_T` with uniform weights.
 

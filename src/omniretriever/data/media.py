@@ -108,13 +108,10 @@ def load_audio_waveform(
     Returns:
         A NumPy array of shape ``(duration_sec * sample_rate,)``, ``dtype=float32``.
     """
-    import librosa
-
     path = str(path)
     target_len = int(duration_sec * sample_rate)
 
-    waveform, _ = librosa.load(path, sr=sample_rate, mono=True)
-    waveform = np.asarray(waveform, dtype=np.float32)
+    waveform = np.asarray(_decode_waveform(path, sample_rate), dtype=np.float32)
 
     if waveform.shape[0] >= target_len:
         # Centre crop.
@@ -131,3 +128,56 @@ def load_audio_waveform(
         return np.tile(waveform, n)[:target_len]
 
     raise ValueError(f"Unknown pad_mode: {pad_mode!r}")
+
+
+def _decode_waveform(path: str, sample_rate: int) -> np.ndarray:
+    """Decode a file to a mono waveform at ``sample_rate``.
+
+    ``librosa`` is tried first: it is fast for plain audio files, which
+    ``libsndfile`` reads directly. It cannot handle the compressed tracks inside
+    video containers (AAC in MP4, for instance), and then falls back to
+    ``audioread``, which needs an ffmpeg binary on PATH. When that is missing we
+    decode with PyAV, which links its own ffmpeg libraries and so needs nothing
+    installed system-wide.
+    """
+    import librosa
+
+    try:
+        waveform, _ = librosa.load(path, sr=sample_rate, mono=True)
+        return waveform
+    except Exception as exc:  # noqa: BLE001 - librosa surfaces backend errors as many types
+        librosa_error = exc
+
+    try:
+        import av
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not decode audio from {path!r}. librosa failed "
+            f"({type(librosa_error).__name__}: {librosa_error}) and PyAV is not "
+            "installed. Install ffmpeg and put it on PATH, or 'pip install av'."
+        ) from exc
+
+    return _decode_waveform_pyav(av, path, sample_rate)
+
+
+def _decode_waveform_pyav(av, path: str, sample_rate: int) -> np.ndarray:
+    """Decode the first audio stream of ``path`` to mono float32 at ``sample_rate``."""
+    with av.open(path) as container:
+        stream = next((s for s in container.streams if s.type == "audio"), None)
+        if stream is None:
+            raise RuntimeError(f"{path!r} contains no audio stream.")
+
+        resampler = av.audio.resampler.AudioResampler(
+            format="fltp", layout="mono", rate=sample_rate
+        )
+        chunks = [
+            resampled.to_ndarray().reshape(-1)
+            for frame in container.decode(stream)
+            for resampled in resampler.resample(frame)
+        ]
+        # Drain whatever the resampler is still buffering.
+        chunks.extend(resampled.to_ndarray().reshape(-1) for resampled in resampler.resample(None))
+
+    if not chunks:
+        raise RuntimeError(f"Decoded no audio samples from {path!r}.")
+    return np.concatenate(chunks)
