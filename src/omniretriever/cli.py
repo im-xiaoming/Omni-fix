@@ -55,7 +55,7 @@ def extract_main(argv: list[str] | None = None) -> int:
             out = {key: blob[key] for key in blob.files}
         logger.info("Resuming from %s (%d embeddings already done)", partial_path, len(out))
 
-    todo = _plan(records, out)
+    todo = _plan(records, out, args.modalities)
     if not todo:
         logger.info("Nothing left to extract; writing %d embeddings", len(out))
         return _finalise(out, output_path, partial_path)
@@ -118,7 +118,27 @@ def evaluate_main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _plan(records: list[dict], done: Mapping[str, np.ndarray]) -> list[tuple[str, list]]:
+MODALITIES = ("text", "video", "audio", "av", "tv", "at")
+
+# Which embeddings each benchmark direction needs on the query and gallery side.
+# Dropping a direction saves nothing on its own -- the cost is entirely in the
+# six embedding types -- but dropping the four directions that need ``tv`` and
+# ``at`` removes two of the six extraction passes.
+DIRECTIONS = {
+    "t2v": ("text", "video"), "v2t": ("video", "text"),
+    "t2a": ("text", "audio"), "a2t": ("audio", "text"),
+    "v2a": ("video", "audio"), "a2v": ("audio", "video"),
+    "t2av": ("text", "av"), "av2t": ("av", "text"),
+    "a2tv": ("audio", "tv"), "tv2a": ("tv", "audio"),
+    "v2at": ("video", "at"), "at2v": ("at", "video"),
+}
+
+
+def _plan(
+    records: list[dict],
+    done: Mapping[str, np.ndarray],
+    modalities: Sequence[str] = MODALITIES,
+) -> list[tuple[str, list]]:
     """Group the outstanding work by modality.
 
     Returns one ``(modality, [(record_id, encoder_input), ...])`` entry per
@@ -141,7 +161,8 @@ def _plan(records: list[dict], done: Mapping[str, np.ndarray]) -> list[tuple[str
     }
 
     plan: list[tuple[str, list]] = []
-    for modality, source in sources.items():
+    for modality in modalities:
+        source = sources[modality]
         items = [
             (record["id"], value)
             for record in records
@@ -217,13 +238,14 @@ def _build_extract_parser() -> argparse.ArgumentParser:
         help="Write the partial .npz every N batches (default 25).",
     )
     parser.add_argument(
-        "--no-duplicate-audio-tokens",
+        "--duplicate-audio-tokens",
         dest="duplicate_audio_tokens",
-        action="store_false",
+        action="store_true",
         help=(
-            "Reproduce the released audio behaviour, which hands the model half the audio "
-            "token slots the interleaved BEATs branch fills, so half the feature block is "
-            "silently dropped. Use it only to A/B against the corrected path."
+            "Give every audio frame the second token slot the interleaved BEATs branch fills. "
+            "Off by default: the paper's own token budget (Table S2, ~470 tokens for joint AV) "
+            "matches the undoubled layout, and a 300-record A/B moved AVG-all by +0.004 R@1. "
+            "Use it only to A/B."
         ),
     )
     parser.add_argument(
@@ -231,6 +253,19 @@ def _build_extract_parser() -> argparse.ArgumentParser:
         dest="resume",
         action="store_false",
         help="Ignore an existing OUTPUT.partial.npz and extract everything again.",
+    )
+    parser.add_argument(
+        "--modalities",
+        nargs="+",
+        choices=MODALITIES,
+        default=list(MODALITIES),
+        metavar="NAME",
+        help=(
+            "Which embeddings to produce (default: all six). Each one is a separate pass over "
+            "the manifest, so this is the only knob that actually shortens a run. Dropping "
+            "'tv' and 'at' cuts a third of the work and costs the four directions that need "
+            "them: a2tv, tv2a, v2at, at2v."
+        ),
     )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     return parser

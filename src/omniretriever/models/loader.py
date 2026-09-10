@@ -53,10 +53,16 @@ class InferenceConfig:
         normalize: whether to L2-normalize the output embedding.
         precision: numerical precision (one of ``"float32"``, ``"bfloat16"``,
             ``"float16"``).
+        media_instruction: filler appended after a media placeholder when the
+            combination carries no caption. Added downstream to match the
+            training recipe; set it to ``""`` to reproduce the released
+            behaviour of sending a bare placeholder.
         duplicate_audio_tokens: whether to give each audio frame the second
-            token slot the interleaved BEATs branch fills. Added downstream;
-            set it to ``False`` to reproduce the released behaviour, which
-            leaves half the audio feature block unscattered. See
+            token slot the interleaved BEATs branch fills. Added downstream and
+            defaulted **off**: Table S2 of the paper puts the joint AV forward
+            at about 470 tokens, which the undoubled layout matches (465) and
+            the doubled one does not (665). A 300-record A/B moved AVG-all by
+            +0.004 R@1, i.e. nothing. See
             ``omniretriever.inference.encode._apply_beats_audio_slots``.
     """
 
@@ -67,7 +73,8 @@ class InferenceConfig:
     embed_dim: int = DEFAULT_EMBED_DIM
     normalize: bool = True
     precision: str = "bfloat16"
-    duplicate_audio_tokens: bool = True
+    media_instruction: str = "Please describe the video."
+    duplicate_audio_tokens: bool = False
 
     extra: dict = field(default_factory=dict)
 
@@ -104,7 +111,7 @@ class OmniRetriever:
         device: str = "cuda",
         dtype: str = "bfloat16",
         config: InferenceConfig | None = None,
-        duplicate_audio_tokens: bool = True,
+        duplicate_audio_tokens: bool = False,
     ) -> "OmniRetriever":
         """Load WAVE-7B and apply the OmniRetriever LoRA adapter.
 

@@ -40,10 +40,11 @@ def encode_video(backbone, processor, video_path, config):
     paths = _as_list(video_path)
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution) for p in paths]
-    prompts = [_video_prompt(processor)] * len(paths)
+    prompts = [_video_prompt(processor, config.media_instruction)] * len(paths)
     inputs = processor(
         text=prompts,
         videos=frames,
+        size=_video_size(config),
         padding=True,
         return_tensors="pt",
     ).to(_device(backbone))
@@ -56,7 +57,7 @@ def encode_audio(backbone, processor, audio_path, config):
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
                                      sample_rate=config.audio_sample_rate) for p in paths]
-    prompts = [_audio_prompt(processor)] * len(paths)
+    prompts = [_audio_prompt(processor, config.media_instruction)] * len(paths)
     inputs = processor(
         text=prompts,
         audio=waveforms,
@@ -81,12 +82,19 @@ def encode_av(backbone, processor, clip_path, config):
     # With use_audio_in_video the processor rewrites the plain video placeholder
     # into interleaved video/audio chunks itself, so the prompt stays the
     # video-only one and must not carry a separate audio placeholder.
-    prompts = [_video_prompt(processor)] * len(paths)
+    # The filler goes *before* the placeholder on this path only. Everywhere else
+    # it follows the media, as training does, but the backbone's own M-RoPE index
+    # cannot place trailing text once audio is interleaved into the video stream:
+    # get_rope_index over-counts the interleaved chunks, skips its trailing-text
+    # branch, and dies on a shape mismatch exactly the length of the filler.
+    # Leading text goes through the same function without complaint.
+    prompts = [config.media_instruction + _video_prompt(processor)] * len(paths)
     inputs = processor(
         text=prompts,
         videos=frames,
         audio=waveforms,
         sampling_rate=config.audio_sample_rate,
+        size=_video_size(config),
         use_audio_in_video=True,
         padding=True,
         return_tensors="pt",
@@ -137,10 +145,11 @@ def encode_tv(backbone, processor, video_path, text, config):
     paths, texts = _pair(video_path, text, "video_path", "text")
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution) for p in paths]
-    prompts = [_video_prompt(processor) + t for t in texts]
+    prompts = [_video_prompt(processor, t) for t in texts]
     inputs = processor(
         text=prompts,
         videos=frames,
+        size=_video_size(config),
         padding=True,
         return_tensors="pt",
     ).to(_device(backbone))
@@ -161,7 +170,7 @@ def encode_at(backbone, processor, audio_path, text, config):
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
                                      sample_rate=config.audio_sample_rate) for p in paths]
-    prompts = [_audio_prompt(processor) + t for t in texts]
+    prompts = [_audio_prompt(processor, t) for t in texts]
     inputs = processor(
         text=prompts,
         audio=waveforms,
@@ -191,14 +200,44 @@ def _pair(media, text, media_name: str, text_name: str) -> tuple[list, list]:
 # --------------------------------------------------------------------------- #
 
 
-def _video_prompt(processor) -> str:
-    """Placeholder the processor expands into one token per video patch."""
-    return processor.vision_bos_token + processor.video_token + processor.vision_eos_token
+# Filler the training pipeline appends whenever a modality combination carries
+# no caption of its own; see
+# ``training/qwenvl/data/data_qwen.py::_prepare_submodal_input``. ADDED to the
+# inference path downstream: the released ``encode_*`` helpers passed the bare
+# placeholder with no text at all, which is not a shape the backbone ever saw in
+# training. Table S2 of the paper counts it too, describing the joint AV input as
+# "video + audio + prompt".
+MEDIA_INSTRUCTION = "Please describe the video."
 
 
-def _audio_prompt(processor) -> str:
-    """Placeholder the processor expands into one token per audio frame."""
-    return processor.audio_bos_token + processor.audio_token + processor.audio_eos_token
+def _video_prompt(processor, suffix: str = "") -> str:
+    """Video placeholder, followed by ``suffix`` (a caption or the filler)."""
+    return (
+        processor.vision_bos_token + processor.video_token + processor.vision_eos_token + suffix
+    )
+
+
+def _audio_prompt(processor, suffix: str = "") -> str:
+    """Audio placeholder, followed by ``suffix`` (a caption or the filler)."""
+    return processor.audio_bos_token + processor.audio_token + processor.audio_eos_token + suffix
+
+
+def _video_size(config) -> dict:
+    """Pixel budget that keeps a frame at ``config.video_resolution``.
+
+    ADDED downstream. Left to itself the video processor rescales a 224 px frame
+    up to 336 px, which turns the 8-frame clip into 576 language-model tokens
+    instead of 256. Table S2 of the paper puts a video-only forward at about 268
+    tokens, i.e. 256 visual tokens plus the placeholder pair and the filler
+    prompt, so the default rescale more than doubles the visual budget the model
+    was trained on. ``max_pixels`` is ignored by this processor version; only a
+    ``size`` dict takes effect.
+    """
+    edge = config.video_resolution
+    return {"shortest_edge": _MIN_PIXELS, "longest_edge": edge * edge}
+
+
+_MIN_PIXELS = 3136
 
 
 def _apply_beats_audio_slots(inputs, processor, backbone, config):
