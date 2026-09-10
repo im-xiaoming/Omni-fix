@@ -1,8 +1,11 @@
 """Lightweight media loaders shared between training and inference.
 
 The loaders intentionally do not import heavy frameworks at module-import time;
-all heavy dependencies (``decord``, ``librosa``) are imported lazily inside the
+all heavy dependencies (``av``, ``librosa``) are imported lazily inside the
 function bodies so users who only need text encoding can avoid the cost.
+
+Video decoding moved from ``decord`` to PyAV downstream of the release; see the
+note on :func:`load_video_frames`. ``decord`` is no longer imported anywhere.
 """
 
 from __future__ import annotations
@@ -38,20 +41,45 @@ def load_video_frames(
     Returns:
         A NumPy array of shape ``(num_frames, resolution, resolution, 3)``,
         ``dtype=uint8``, RGB.
-    """
-    import decord
-    from decord import VideoReader, cpu
 
-    decord.bridge.set_bridge("native")
+    Note:
+        CHANGED downstream. The released code decoded with ``decord``, which
+        hangs forever inside its native reader on a large share of this
+        benchmark's clips -- 561 of 3515 in a full sweep, concentrated in the
+        newest source ids. The hang happens while constructing ``VideoReader``,
+        in C, so no Python-side timeout can interrupt it. PyAV reads every one
+        of those files (562 of the 567 decord could not handle; the other five
+        decode to zero frames under either library and are genuinely broken),
+        and it is already a dependency because the audio loader falls back to
+        it.
+
+        The two libraries disagree on how many frames a clip holds, because
+        decord trusts the container index while this counts frames it actually
+        decoded. Uniform sampling spreads its indices over that total, so the
+        selected frames -- and every ``video``, ``av`` and ``tv`` embedding --
+        differ from a decord-based run. Do not mix embeddings across the two.
+
+        Frames are held at full resolution until the sample is picked, so peak
+        memory scales with clip length rather than ``num_frames``. The
+        benchmark's p99 clip is 16 s, which is comfortable; very long inputs
+        would not be.
+    """
+    import av
 
     path = str(path)
-    reader = VideoReader(path, ctx=cpu(0), num_threads=1)
-    total = len(reader)
+    with av.open(path) as container:
+        if not container.streams.video:
+            raise RuntimeError(f"{path!r} contains no video stream.")
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
+
+    total = len(frames)
     if total == 0:
         raise RuntimeError(f"Video {path!r} has zero frames.")
 
     if sampling == "uniform":
-        idx = np.linspace(0, max(total - 1, 0), num=num_frames, dtype=int)
+        idx = np.linspace(0, total - 1, num=num_frames, dtype=int)
     elif sampling == "random":
         idx = np.sort(
             np.random.default_rng().choice(total, size=min(num_frames, total), replace=False)
@@ -59,9 +87,7 @@ def load_video_frames(
     else:
         raise ValueError(f"Unknown sampling strategy: {sampling!r}")
 
-    frames = reader.get_batch(idx).asnumpy()  # (N, H, W, 3) uint8
-    frames = _resize_frames(frames, resolution)
-    return frames
+    return _resize_frames(np.stack([frames[i] for i in idx]), resolution)
 
 
 def _resize_frames(frames: np.ndarray, resolution: int) -> np.ndarray:
