@@ -53,6 +53,11 @@ class InferenceConfig:
         normalize: whether to L2-normalize the output embedding.
         precision: numerical precision (one of ``"float32"``, ``"bfloat16"``,
             ``"float16"``).
+        duplicate_audio_tokens: whether to give each audio frame the second
+            token slot the interleaved BEATs branch fills. Added downstream;
+            set it to ``False`` to reproduce the released behaviour, which
+            leaves half the audio feature block unscattered. See
+            ``omniretriever.inference.encode._apply_beats_audio_slots``.
     """
 
     video_max_frames: int = DEFAULT_VIDEO_FRAMES
@@ -62,6 +67,7 @@ class InferenceConfig:
     embed_dim: int = DEFAULT_EMBED_DIM
     normalize: bool = True
     precision: str = "bfloat16"
+    duplicate_audio_tokens: bool = True
 
     extra: dict = field(default_factory=dict)
 
@@ -98,6 +104,7 @@ class OmniRetriever:
         device: str = "cuda",
         dtype: str = "bfloat16",
         config: InferenceConfig | None = None,
+        duplicate_audio_tokens: bool = True,
     ) -> "OmniRetriever":
         """Load WAVE-7B and apply the OmniRetriever LoRA adapter.
 
@@ -106,7 +113,10 @@ class OmniRetriever:
             adapter: path of the released LoRA adapter directory.
             device: PyTorch device string.
             dtype: precision (one of ``float32`` / ``bfloat16`` / ``float16``).
-            config: optional :class:`InferenceConfig` override.
+            config: optional :class:`InferenceConfig` override. When given, it
+                is used as-is and ``duplicate_audio_tokens`` is ignored.
+            duplicate_audio_tokens: see the field of the same name on
+                :class:`InferenceConfig`.
 
         Returns:
             An :class:`OmniRetriever` instance ready for ``encode_*`` calls.
@@ -119,7 +129,9 @@ class OmniRetriever:
         from omniretriever.models.wave import load_wave_backbone
 
         torch_dtype = _resolve_dtype(dtype)
-        config = config or InferenceConfig(precision=dtype)
+        config = config or InferenceConfig(
+            precision=dtype, duplicate_audio_tokens=duplicate_audio_tokens
+        )
 
         logger.info("Loading WAVE-7B backbone from %s", base_model)
         backbone = load_wave_backbone(base_model, torch_dtype=torch_dtype)
@@ -174,6 +186,32 @@ class OmniRetriever:
         from omniretriever.inference.encode import encode_av
 
         return encode_av(self._backbone, self._processor, clip_path, self._config)
+
+    # ------------------------------------------------------------------ #
+    # Dual-modal encoders (added downstream, not in the original release) #
+    # ------------------------------------------------------------------ #
+
+    @torch.inference_mode()
+    def encode_tv(self, video_path, text) -> torch.Tensor:
+        """Encode video and text jointly (the ``tv`` side of the benchmark).
+
+        Added for this checkout; see the note above ``encode_tv`` in
+        ``omniretriever.inference.encode`` for how the prompt is built and how
+        it relates to the training-time recipe.
+        """
+        from omniretriever.inference.encode import encode_tv
+
+        return encode_tv(self._backbone, self._processor, video_path, text, self._config)
+
+    @torch.inference_mode()
+    def encode_at(self, audio_path, text) -> torch.Tensor:
+        """Encode audio and text jointly (the ``at`` side of the benchmark).
+
+        Added for this checkout, same caveats as :meth:`encode_tv`.
+        """
+        from omniretriever.inference.encode import encode_at
+
+        return encode_at(self._backbone, self._processor, audio_path, text, self._config)
 
     # ------------------------------------------------------------------ #
     # Accessors                                                          #

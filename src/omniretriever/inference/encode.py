@@ -63,7 +63,8 @@ def encode_audio(backbone, processor, audio_path, config):
         sampling_rate=config.audio_sample_rate,
         padding=True,
         return_tensors="pt",
-    ).to(_device(backbone))
+    )
+    inputs = _apply_beats_audio_slots(inputs, processor, backbone, config).to(_device(backbone))
     return _forward_and_normalise(
         backbone, inputs, config, input_raw_wav=_raw_wav(waveforms, backbone)
     )
@@ -89,7 +90,8 @@ def encode_av(backbone, processor, clip_path, config):
         use_audio_in_video=True,
         padding=True,
         return_tensors="pt",
-    ).to(_device(backbone))
+    )
+    inputs = _apply_beats_audio_slots(inputs, processor, backbone, config).to(_device(backbone))
     return _forward_and_normalise(
         backbone,
         inputs,
@@ -97,6 +99,91 @@ def encode_av(backbone, processor, clip_path, config):
         use_audio_in_video=True,
         input_raw_wav=_raw_wav(waveforms, backbone),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Dual-modal encoders (added downstream, not part of the original release)     #
+# --------------------------------------------------------------------------- #
+#
+# NOTE: everything from here to the "Internals" banner was written for this
+# checkout; the released OmniRetriever code ships only the four encoders above.
+# Without them the `tv` and `at` query sides are missing, so four of the twelve
+# benchmark directions (a2tv, tv2a, v2at, at2v) cannot be scored at all.
+#
+# The prompt layout follows the training-time recipe in
+# ``training/qwenvl/data/data_qwen.py::_prepare_submodal_input``: one media
+# placeholder first, the caption after it, and no separate audio placeholder
+# whenever a video is present. What it does *not* copy is the generic
+# "Please describe the video." filler that upstream substitutes when a
+# combination carries no caption, since both combinations here always do.
+#
+# Caveat worth knowing before trusting the numbers: upstream builds that prompt
+# through ``apply_chat_template`` plus ``replace_multimodal_special_tokens``,
+# while the released ``encode_*`` helpers hand the processor bare placeholder
+# tokens. These two encoders follow the released inference convention so their
+# output shares a space with the other four, not the training convention.
+
+
+def encode_tv(backbone, processor, video_path, text, config):
+    """Encode video and text jointly into the shared embedding space.
+
+    Args:
+        video_path: one path, or a sequence of paths, to video files.
+        text: the matching caption, or a sequence of captions of equal length.
+
+    Returns:
+        Tensor of shape ``(N, D)``.
+    """
+    paths, texts = _pair(video_path, text, "video_path", "text")
+    frames = [load_video_frames(p, num_frames=config.video_max_frames,
+                                resolution=config.video_resolution) for p in paths]
+    prompts = [_video_prompt(processor) + t for t in texts]
+    inputs = processor(
+        text=prompts,
+        videos=frames,
+        padding=True,
+        return_tensors="pt",
+    ).to(_device(backbone))
+    return _forward_and_normalise(backbone, inputs, config)
+
+
+def encode_at(backbone, processor, audio_path, text, config):
+    """Encode audio and text jointly into the shared embedding space.
+
+    Args:
+        audio_path: one path, or a sequence of paths, to audio files.
+        text: the matching caption, or a sequence of captions of equal length.
+
+    Returns:
+        Tensor of shape ``(N, D)``.
+    """
+    paths, texts = _pair(audio_path, text, "audio_path", "text")
+    waveforms = [load_audio_waveform(p,
+                                     duration_sec=config.audio_duration_sec,
+                                     sample_rate=config.audio_sample_rate) for p in paths]
+    prompts = [_audio_prompt(processor) + t for t in texts]
+    inputs = processor(
+        text=prompts,
+        audio=waveforms,
+        sampling_rate=config.audio_sample_rate,
+        padding=True,
+        return_tensors="pt",
+    )
+    inputs = _apply_beats_audio_slots(inputs, processor, backbone, config).to(_device(backbone))
+    return _forward_and_normalise(
+        backbone, inputs, config, input_raw_wav=_raw_wav(waveforms, backbone)
+    )
+
+
+def _pair(media, text, media_name: str, text_name: str) -> tuple[list, list]:
+    """Normalise a (media, text) argument pair into two equal-length lists."""
+    media_list, text_list = _as_list(media), _as_list(text)
+    if len(media_list) != len(text_list):
+        raise ValueError(
+            f"{media_name} and {text_name} must have the same length; "
+            f"got {len(media_list)} and {len(text_list)}."
+        )
+    return media_list, text_list
 
 
 # --------------------------------------------------------------------------- #
@@ -112,6 +199,59 @@ def _video_prompt(processor) -> str:
 def _audio_prompt(processor) -> str:
     """Placeholder the processor expands into one token per audio frame."""
     return processor.audio_bos_token + processor.audio_token + processor.audio_eos_token
+
+
+def _apply_beats_audio_slots(inputs, processor, backbone, config):
+    """Give every audio frame the second token slot the BEATs branch needs.
+
+    ADDED downstream; the released code does not do this. With ``use_beats`` on
+    and ``beats_only`` off, the WAVE forward pass interleaves one BEATs vector
+    after every whisper vector, so the feature block it scatters into the token
+    stream is twice as long as the audio placeholder the processor expands. The
+    scatter is a ``masked_scatter``, which consumes as many rows as there are
+    slots and silently drops the rest, so half the audio timeline never reaches
+    the model. Upstream avoids this by doubling the placeholder after expansion
+    (``training/qwenvl/data/data_qwen.py::_prepare_submodal_input``); this is the
+    same edit applied to the already-tokenised ids.
+
+    Set ``InferenceConfig.duplicate_audio_tokens = False`` to reproduce the
+    released behaviour.
+    """
+    if not config.duplicate_audio_tokens or not _beats_interleaves(backbone):
+        return inputs
+
+    audio_token_id = processor.tokenizer.convert_tokens_to_ids(processor.audio_token)
+    pad_token_id = processor.tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = processor.tokenizer.eos_token_id
+
+    ids_rows, mask_rows = [], []
+    for ids, mask in zip(inputs["input_ids"], inputs["attention_mask"]):
+        repeats = torch.where(ids == audio_token_id, 2, 1)
+        ids_rows.append(torch.repeat_interleave(ids, repeats))
+        mask_rows.append(torch.repeat_interleave(mask, repeats))
+
+    # The processor left-pads the text stream and the fusion head pools the
+    # final position, so the re-padding has to stay on the left.
+    width = max(row.numel() for row in ids_rows)
+    inputs["input_ids"] = torch.stack(
+        [F.pad(row, (width - row.numel(), 0), value=pad_token_id) for row in ids_rows]
+    )
+    inputs["attention_mask"] = torch.stack(
+        [F.pad(row, (width - row.numel(), 0), value=0) for row in mask_rows]
+    )
+    return inputs
+
+
+def _beats_interleaves(backbone) -> bool:
+    """True when the forward pass emits two feature rows per audio frame."""
+    from omniretriever.models.beats_adaptor import find_beats_host
+
+    try:
+        host = find_beats_host(backbone)
+    except AttributeError:
+        return False
+    return bool(getattr(host, "use_beats", False)) and not bool(getattr(host, "beats_only", False))
 
 
 def _raw_wav(waveforms, backbone) -> list:
