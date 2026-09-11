@@ -100,6 +100,7 @@ def _is_peft_model(model):
     return isinstance(model, PeftModel)
 
 class QwenVLTrainer(Trainer):
+    use_apex: bool = False
 
     def __init__(
         self,
@@ -109,6 +110,8 @@ class QwenVLTrainer(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.skip_deepspeed_load = skip_deepspeed_load
+        if not hasattr(self, "use_apex"):
+            self.use_apex = False
 
     def set_initial_training_values(self, args, train_dataloader, total_train_batch_size=None):
         try:
@@ -520,7 +523,7 @@ class QwenVLTrainer(Trainer):
         if use_accelerator_prepare:
             self.model.train()
             if hasattr(self.lr_scheduler, "step"):
-                if self.use_apex:
+                if getattr(self, "use_apex", False):
                     model = self.accelerator.prepare(self.model)
                 else:
                     model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
@@ -751,7 +754,7 @@ class QwenVLTrainer(Trainer):
                         if args.max_grad_norm is not None and args.max_grad_norm > 0:
                             if is_sagemaker_mp_enabled() and args.fp16:
                                 _grad_norm = self.optimizer.clip_master_grads(args.max_grad_norm)
-                            elif self.use_apex:
+                            elif getattr(self, "use_apex", False):
                                 # Revert to normal clipping otherwise, handling Apex or full precision
                                 _grad_norm = nn.utils.clip_grad_norm_(
                                     amp.master_params(self.optimizer),
@@ -1020,7 +1023,7 @@ class QwenVLTrainer(Trainer):
             obj2_loss = obj2_loss.mean()
             obj3_loss = obj3_loss.mean()
 
-        if self.use_apex:
+        if getattr(self, "use_apex", False):
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                 scaled_loss.backward()
         else:
