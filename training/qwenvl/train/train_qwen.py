@@ -161,7 +161,11 @@ def train(attn_implementation="flash_attention_2"):
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments)
     )
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    model_args, data_args, training_args, remaining_args = parser.parse_args_into_dataclasses(
+        return_remaining_strings=True
+    )
+    if remaining_args:
+        logging.warning(f"Unrecognized arguments passed to parser: {remaining_args}")
     data_args.train_classify = model_args.train_classify
     model_args.temperature = training_args.temperature
     data_args.use_beats = model_args.use_beats
