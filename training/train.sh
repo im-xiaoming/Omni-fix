@@ -59,11 +59,26 @@ export VIDEO_ROOT
 export AUDIO_ROOT
 export IMAGE_ROOT="${IMAGE_ROOT:-}"
 
+# --- auto-detect GPU count if not set ---
+if [ -z "${NUM_GPUS:-}" ]; then
+  if command -v nvidia-smi &>/dev/null; then
+    NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+  elif command -v python3 &>/dev/null; then
+    NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
+  else
+    NUM_GPUS=1
+  fi
+  NUM_GPUS=$(( NUM_GPUS > 0 ? NUM_GPUS : 1 ))
+fi
+
 # --- optional knobs ---
-NUM_GPUS="${NUM_GPUS:-4}"
 MASTER_PORT="${MASTER_PORT:-29503}"
 EPOCHS="${EPOCHS:-1}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
+if [ "${NUM_GPUS}" -le 1 ]; then
+  BATCH_SIZE="${BATCH_SIZE:-1}"
+else
+  BATCH_SIZE="${BATCH_SIZE:-8}"
+fi
 GRAD_ACCUM="${GRAD_ACCUM:-8}"
 LR="${LR:-1e-5}"
 LORA_R="${LORA_R:-16}"
@@ -71,6 +86,35 @@ LORA_ALPHA="${LORA_ALPHA:-32}"
 LORA_INIT_ONLY="${LORA_INIT_ONLY:-True}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 USE_TUPLE_INFONCE="${USE_TUPLE_INFONCE:-True}"
+
+echo "============================================================"
+echo "  OmniRetriever-7B Training Launcher (Bash)"
+echo "============================================================"
+echo "GPU COUNT  : ${NUM_GPUS}"
+echo "WAVE_PATH  : ${WAVE_PATH}"
+echo "BEATS_PATH : ${BEATS_PATH}"
+echo "DATA_PATH  : ${DATA_PATH}"
+echo "VIDEO_ROOT : ${VIDEO_ROOT}"
+echo "AUDIO_ROOT : ${AUDIO_ROOT}"
+echo "LORA_CKPT  : ${LORA_CKPT}"
+echo "OUTPUT_DIR : ${OUTPUT_DIR}"
+echo "BATCH_SIZE : ${BATCH_SIZE} | GRAD_ACCUM: ${GRAD_ACCUM} | EPOCHS: ${EPOCHS}"
+echo "============================================================"
+
+# Kiểm tra đường dẫn tồn tại
+if [ ! -e "${WAVE_PATH}" ]; then
+  echo "LỖI: Không tìm thấy thư mục WAVE_PATH: ${WAVE_PATH}"
+  echo "Vui lòng export đúng đường dẫn thực tế trên môi trường của bạn (ví dụ: export WAVE_PATH=/content/WAVE-7B)"
+  exit 1
+fi
+if [ ! -e "${BEATS_PATH}" ]; then
+  echo "LỖI: Không tìm thấy file BEATS_PATH: ${BEATS_PATH}"
+  exit 1
+fi
+if [ ! -e "${DATA_PATH}" ]; then
+  echo "LỖI: Không tìm thấy file DATA_PATH: ${DATA_PATH}"
+  exit 1
+fi
 
 if command -v deepspeed &>/dev/null; then
   echo "Chạy với DeepSpeed (GPUs: ${NUM_GPUS}, Port: ${MASTER_PORT})..."
