@@ -69,6 +69,7 @@ def extract_main(argv: list[str] | None = None) -> int:
         dtype=args.dtype,
         duplicate_audio_tokens=args.duplicate_audio_tokens,
         pin_video_resolution=args.pin_video_resolution,
+        instruction_paths=args.instruction_paths,
     )
     # tv and at take two arguments, so their batches arrive as (media, caption)
     # pairs and are transposed back into two parallel lists here.
@@ -81,12 +82,9 @@ def extract_main(argv: list[str] | None = None) -> int:
         "at": lambda values: model.encode_at(*_unzip(values)),
     }
 
-    batches = [
-        (modality, items[i:i + args.batch_size])
-        for modality, items in todo
-        for i in range(0, len(items), args.batch_size)
-    ]
-    for done, (modality, chunk) in enumerate(_progress(batches, "extracting"), start=1):
+    batches = _batches(todo, args.batch_size)
+    stream = _with_prefetch(batches, model.config, args.prefetch)
+    for done, (modality, chunk) in enumerate(_progress(stream, "extracting", len(batches)), start=1):
         vectors = encoders[modality]([value for _, value in chunk]).cpu().float().numpy()
         for (record_id, _), vector in zip(chunk, vectors):
             out[f"{record_id}__{modality}"] = vector
@@ -180,14 +178,110 @@ def _unzip(pairs: Sequence[tuple]) -> tuple[list, list]:
     return [a for a, _ in pairs], [b for _, b in pairs]
 
 
-def _progress(items: Sequence, description: str) -> Iterable:
+def _batches(todo: Sequence[tuple[str, list]], batch_size: int) -> list[tuple[str, list]]:
+    """Cut the plan into batches, record-major when that is safe.
+
+    Each ``encode_*`` helper builds one prompt template per call, so a batch has
+    to be homogeneous in modality. Beyond that the order is free, and it matters:
+    ``video``, ``av`` and ``tv`` all decode the same clip, so visiting one record
+    across every modality before moving on lets the loader cache in
+    ``omniretriever.data.media`` serve two of those three decodes. Modality-major
+    order would evict the entry long before the second visit.
+
+    That regrouping only works at ``batch_size == 1``, where a batch is a single
+    record anyway. Larger batches keep the modality-major order.
+    """
+    chunks = [
+        (modality, items[i:i + batch_size])
+        for modality, items in todo
+        for i in range(0, len(items), batch_size)
+    ]
+    if batch_size != 1:
+        return chunks
+
+    by_record: dict[str, list] = {}
+    for chunk in chunks:
+        by_record.setdefault(chunk[1][0][0], []).append(chunk)
+    return [chunk for record_chunks in by_record.values() for chunk in record_chunks]
+
+
+def _media_keys(batch: tuple[str, list]) -> list[tuple[str, str]]:
+    """The ``(kind, path)`` pairs a batch will decode."""
+    modality, chunk = batch
+    keys = []
+    for _, value in chunk:
+        path = value[0] if isinstance(value, tuple) else value
+        if modality in ("video", "av", "tv"):
+            keys.append(("video", path))
+        if modality in ("audio", "av", "at"):
+            keys.append(("audio", path))
+    return keys
+
+
+def _warm(key: tuple[str, str], config) -> None:
+    """Decode one media file into the loader cache, ignoring failures.
+
+    Failures are left for the real call to raise, where the traceback points at
+    the record being encoded rather than at a prefetch thread.
+    """
+    from omniretriever.data.media import load_audio_waveform, load_video_frames
+
+    kind, path = key
+    try:
+        if kind == "video":
+            load_video_frames(path, num_frames=config.video_max_frames,
+                              resolution=config.video_resolution)
+        else:
+            load_audio_waveform(path, duration_sec=config.audio_duration_sec,
+                                sample_rate=config.audio_sample_rate)
+    except Exception:  # noqa: BLE001 - the encode call re-raises with context
+        pass
+
+
+def _with_prefetch(batches: Sequence[tuple[str, list]], config, workers: int) -> Iterable:
+    """Yield batches while decoding upcoming ones on a thread pool.
+
+    Decoding runs on the CPU and the forward pass on the GPU, so without this the
+    two take turns. PyAV and libsndfile both drop the GIL while decoding, which
+    is what lets plain threads overlap the two.
+
+    The lookahead is bounded by the loader cache: prefetching further than it can
+    hold would evict entries before the main loop reaches them.
+    """
+    if workers <= 0:
+        yield from batches
+        return
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from omniretriever.data.media import VIDEO_CACHE_SIZE
+
+    lookahead = min(max(workers * 2, 4), VIDEO_CACHE_SIZE - 2)
+    # Three batches of the same record (video, av, tv) decode the same file, so
+    # submitting per batch would put three threads on it at once. lru_cache is
+    # not atomic, so all three would decode it -- measured as a 3x rise in cache
+    # misses and a run twice as slow as no prefetch at all. Submit per file.
+    queued: set[tuple[str, str]] = set()
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="decode") as pool:
+        submitted = 0
+        for index, batch in enumerate(batches):
+            while submitted < min(index + 1 + lookahead, len(batches)):
+                for key in _media_keys(batches[submitted]):
+                    if key not in queued:
+                        queued.add(key)
+                        pool.submit(_warm, key, config)
+                submitted += 1
+            yield batch
+
+
+def _progress(items: Iterable, description: str, total: int) -> Iterable:
     """Wrap ``items`` in a tqdm bar, falling back to a plain iterator."""
     try:
         from tqdm.auto import tqdm
     except ImportError:
-        logger.info("%s: %d batches (install tqdm for a progress bar)", description, len(items))
+        logger.info("%s: %d batches (install tqdm for a progress bar)", description, total)
         return items
-    return tqdm(items, desc=description, unit="batch")
+    return tqdm(items, desc=description, unit="batch", total=total)
 
 
 def _checkpoint(out: Mapping[str, np.ndarray], partial_path: Path) -> None:
@@ -237,6 +331,32 @@ def _build_extract_parser() -> argparse.ArgumentParser:
         type=int,
         default=25,
         help="Write the partial .npz every N batches (default 25).",
+    )
+    parser.add_argument(
+        "--instruction-paths",
+        nargs="*",
+        choices=("video", "audio", "av"),
+        default=["audio", "av"],
+        metavar="PATH",
+        help=(
+            "Which encoders append the filler prompt (default: audio av; pass none to disable "
+            "everywhere). It does not help everywhere: on 300 records the audio path gained "
+            "0.087 R@1 on t2a and 0.083 on a2t, while the video path lost 0.087 on v2t and "
+            "0.077 on v2at. 'av' is included on trust, not measurement."
+        ),
+    )
+    parser.add_argument(
+        "--prefetch",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Decode upcoming clips on N background threads so the CPU-bound decode can overlap "
+            "the GPU forward pass. Off by default and unproven: on a CPU-only box, where there "
+            "is no forward pass to hide behind, 4 threads ran 14%% slower than none because the "
+            "threads only contend. Whether it pays on a GPU was not measured. The win that is "
+            "measured lives in the record-major batch order instead (2.75x on 80 records)."
+        ),
     )
     parser.add_argument(
         "--pin-video-resolution",

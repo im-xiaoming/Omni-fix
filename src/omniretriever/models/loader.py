@@ -59,10 +59,17 @@ class InferenceConfig:
             floor is the released configuration, and pinning cost ``v2t`` 0.087
             R@1 on a 300-record run. See
             ``omniretriever.inference.encode._video_kwargs``.
-        media_instruction: filler appended after a media placeholder when the
+        media_instruction: filler placed next to a media placeholder when the
             combination carries no caption. Added downstream to match the
             training recipe; set it to ``""`` to reproduce the released
             behaviour of sending a bare placeholder.
+        instruction_paths: which encoders actually use that filler. It does not
+            help everywhere. Measured on 300 records, adding it to the audio
+            path lifted ``t2a`` from 0.110 to 0.197 and ``a2t`` from 0.103 to
+            0.187, while adding it to the video path cost ``v2t`` 0.087 and
+            ``v2at`` 0.077 for a 0.013 gain on ``t2v``. So ``video`` is out by
+            default and ``audio`` is in. ``av`` carries both streams, so neither
+            contrast covers it; it keeps the filler until someone measures it.
         duplicate_audio_tokens: whether to give each audio frame the second
             token slot the interleaved BEATs branch fills. Added downstream and
             defaulted **off**: Table S2 of the paper puts the joint AV forward
@@ -80,6 +87,7 @@ class InferenceConfig:
     normalize: bool = True
     precision: str = "bfloat16"
     media_instruction: str = "Please describe the video."
+    instruction_paths: tuple[str, ...] = ("audio", "av")
     duplicate_audio_tokens: bool = False
     pin_video_resolution: bool = False
 
@@ -120,6 +128,7 @@ class OmniRetriever:
         config: InferenceConfig | None = None,
         duplicate_audio_tokens: bool = False,
         pin_video_resolution: bool = False,
+        instruction_paths: Sequence[str] = ("audio", "av"),
     ) -> "OmniRetriever":
         """Load WAVE-7B and apply the OmniRetriever LoRA adapter.
 
@@ -133,6 +142,8 @@ class OmniRetriever:
             duplicate_audio_tokens: see the field of the same name on
                 :class:`InferenceConfig`.
             pin_video_resolution: see the field of the same name on
+                :class:`InferenceConfig`.
+            instruction_paths: see the field of the same name on
                 :class:`InferenceConfig`.
 
         Returns:
@@ -150,6 +161,7 @@ class OmniRetriever:
             precision=dtype,
             duplicate_audio_tokens=duplicate_audio_tokens,
             pin_video_resolution=pin_video_resolution,
+            instruction_paths=tuple(instruction_paths),
         )
 
         logger.info("Loading WAVE-7B backbone from %s", base_model)

@@ -40,7 +40,7 @@ def encode_video(backbone, processor, video_path, config):
     paths = _as_list(video_path)
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution) for p in paths]
-    prompts = [_video_prompt(processor, config.media_instruction)] * len(paths)
+    prompts = [_video_prompt(processor, _instruction(config, "video"))] * len(paths)
     inputs = processor(
         text=prompts,
         videos=frames,
@@ -57,7 +57,7 @@ def encode_audio(backbone, processor, audio_path, config):
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
                                      sample_rate=config.audio_sample_rate) for p in paths]
-    prompts = [_audio_prompt(processor, config.media_instruction)] * len(paths)
+    prompts = [_audio_prompt(processor, _instruction(config, "audio"))] * len(paths)
     inputs = processor(
         text=prompts,
         audio=waveforms,
@@ -88,7 +88,7 @@ def encode_av(backbone, processor, clip_path, config):
     # get_rope_index over-counts the interleaved chunks, skips its trailing-text
     # branch, and dies on a shape mismatch exactly the length of the filler.
     # Leading text goes through the same function without complaint.
-    prompts = [config.media_instruction + _video_prompt(processor)] * len(paths)
+    prompts = [_instruction(config, "av") + _video_prompt(processor)] * len(paths)
     inputs = processor(
         text=prompts,
         videos=frames,
@@ -208,6 +208,11 @@ def _pair(media, text, media_name: str, text_name: str) -> tuple[list, list]:
 # training. Table S2 of the paper counts it too, describing the joint AV input as
 # "video + audio + prompt".
 MEDIA_INSTRUCTION = "Please describe the video."
+
+
+def _instruction(config, path: str) -> str:
+    """The filler for one encoder, empty when that path opts out."""
+    return config.media_instruction if path in config.instruction_paths else ""
 
 
 def _video_prompt(processor, suffix: str = "") -> str:

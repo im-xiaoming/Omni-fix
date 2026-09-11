@@ -10,11 +10,25 @@ note on :func:`load_video_frames`. ``decord`` is no longer imported anywhere.
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+
+# ADDED downstream. A single extraction pass touches the same clip three times,
+# once for ``video``, once for ``av`` and once for ``tv``, and decoding is the
+# slowest step in the whole pipeline. Memoising the loaders turns that into one
+# decode per clip as long as the three calls land close together, which is what
+# the record-major batch order in ``omniretriever.cli`` arranges.
+#
+# The entries are small -- video frames come back already resized, so an 8-frame
+# 224 px clip is 1.2 MB, and an 8 s mono waveform at 16 kHz is 512 KB -- so a few
+# dozen of them cost tens of megabytes. Callers must not mutate what they get
+# back: every hit hands out the same array.
+VIDEO_CACHE_SIZE = 32
+AUDIO_CACHE_SIZE = 32
 
 
 # --------------------------------------------------------------------------- #
@@ -22,6 +36,7 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 
 
+@functools.lru_cache(maxsize=VIDEO_CACHE_SIZE)
 def load_video_frames(
     path: str | os.PathLike,
     *,
@@ -112,6 +127,7 @@ def _resize_frames(frames: np.ndarray, resolution: int) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 
+@functools.lru_cache(maxsize=AUDIO_CACHE_SIZE)
 def load_audio_waveform(
     path: str | os.PathLike,
     *,
