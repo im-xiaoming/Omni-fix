@@ -12,10 +12,20 @@ from __future__ import annotations
 
 import functools
 import os
+import warnings
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+
+# librosa cannot read the AAC track inside an MP4 through libsndfile, so it falls
+# back to audioread and warns about it -- twice per clip, several lines each. The
+# fallback is the correct path and its output is what every existing embedding was
+# built on, so this silences the noise and changes nothing else. Worth doing: on
+# Colab every one of those lines is streamed to the browser, and a full run makes
+# tens of thousands of them.
+warnings.filterwarnings("ignore", message="PySoundFile failed.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*__audioread_load.*", category=FutureWarning)
 
 # ADDED downstream. A single extraction pass touches the same clip three times,
 # once for ``video``, once for ``av`` and once for ``tv``, and decoding is the
