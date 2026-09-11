@@ -47,9 +47,13 @@ from transformers import AutoConfig
 from qwenvl.model.qwen2_5_omni.configuration_qwen2_5_omni import Qwen2_5OmniThinkerConfig
 from qwenvl.train.trainer import QwenVLTrainer
 
-from liger_kernel.transformers.qwen2vl_mrope import liger_multimodal_rotary_pos_emb
-from liger_kernel.transformers.rms_norm import LigerRMSNorm
-from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
+try:
+    from liger_kernel.transformers.qwen2vl_mrope import liger_multimodal_rotary_pos_emb
+    from liger_kernel.transformers.rms_norm import LigerRMSNorm
+    from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
+    HAS_LIGER = True
+except ImportError:
+    HAS_LIGER = False
 
 from tqdm import tqdm
 import torch.distributed as dist
@@ -82,6 +86,10 @@ def apply_liger_kernel_to_qwen2_5_vl(
     rms_norm: bool = True,
     swiglu: bool = True,
 ) -> None:
+    if not HAS_LIGER:
+        print("Liger kernel is not installed. Using standard PyTorch implementations.")
+        return
+
     print("Applying Liger kernels to Qwen2.5 model...")
 
     assert not (cross_entropy and fused_linear_cross_entropy), (

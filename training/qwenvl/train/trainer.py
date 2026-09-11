@@ -28,8 +28,11 @@ from transformers.models.auto.modeling_auto import (
 
 import torch
 import torch.nn as nn
-from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from torch.utils.data import DataLoader, Sampler
+try:
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func
+except ImportError:
+    flash_attn_varlen_func = None
 from transformers import Trainer
 from transformers.cache_utils import Cache
 

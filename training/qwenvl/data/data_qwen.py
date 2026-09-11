@@ -39,7 +39,10 @@ from PIL import Image, ImageOps
 from decord import VideoReader, cpu
 import soundfile as sf
 import librosa
-import ffmpeg
+try:
+    import ffmpeg
+except ImportError:
+    ffmpeg = None
 import transformers
 
 import sys
@@ -59,6 +62,33 @@ def rank0_print(*args):
 def read_jsonl(path):
     with open(path, "r") as f:
         return [json.loads(line) for line in f]
+
+
+def resolve_media_path(filename: str, env_var: str) -> str:
+    """Resolve a (possibly relative) media filename to an absolute path.
+
+    If *filename* is already an absolute path it is returned unchanged.
+    Otherwise the value of the environment variable *env_var* is used as a
+    root directory and prepended to *filename*.
+
+    Supported env vars:
+      VIDEO_ROOT  – root directory that contains video files
+      AUDIO_ROOT  – root directory that contains audio files
+      IMAGE_ROOT  – root directory that contains image files
+
+    Example::
+
+        export VIDEO_ROOT=D:/KL/Data/YouCookII/YouCookII/videos
+        export AUDIO_ROOT=D:/KL/Data/YouCookII/YouCookII/audio
+    """
+    if not filename:
+        return filename
+    if os.path.isabs(filename):
+        return filename
+    root = os.environ.get(env_var, "")
+    if root:
+        return os.path.join(root, filename)
+    return filename
 
 def split_into_groups(counts, groups):
     result = []
@@ -596,7 +626,9 @@ class LazySupervisedDataset(Dataset):
             raw_wav = None
 
             if "image" in sources[0]:
-                image_file = self.list_data_dict[i]["image"]
+                image_file = resolve_media_path(
+                    self.list_data_dict[i]["image"], "IMAGE_ROOT"
+                )
                 image, grid_thw = self.process_image_unified(image_file)
                 grid_thw = grid_thw.unsqueeze(0)
                 image = [image]
@@ -611,7 +643,9 @@ class LazySupervisedDataset(Dataset):
 
             if "frame_dir" in sources[0]:
                 video_max_frames = getattr(self.data_args, "video_max_frames", 600)
-                video_file = sources[0]["frame_dir"]
+                video_file = resolve_media_path(
+                    sources[0]["frame_dir"], "VIDEO_ROOT"
+                )
                 frame_files = os.listdir(video_file)
                 frame_files = sorted(frame_files, key=lambda x: int(x.split("_")[-1].split(".")[0]))
                 frame_files = [os.path.join(video_file, fr) for fr in frame_files]
@@ -641,13 +675,13 @@ class LazySupervisedDataset(Dataset):
                     raise NotImplementedError
 
             elif "video" in sources[0]:
-                video_file = sources[0]["video"]
+                _raw_video = sources[0]["video"]
                 timestamps = sources[0].get("timestamps", None)
-                if isinstance(video_file, List):
+                if isinstance(_raw_video, List):
+                    video_file = [
+                        resolve_media_path(f, "VIDEO_ROOT") for f in _raw_video
+                    ]
                     if len(video_file) > 1:
-                        video_file = [
-                            file for file in video_file
-                        ]
                         results = [self.process_video(file) for file in video_file]
                         video, video_grid_thw, second_per_grid_ts = zip(*results)
                     else:
@@ -655,6 +689,7 @@ class LazySupervisedDataset(Dataset):
                         video, video_grid_thw, second_per_grid_ts = self.process_video(video_file)
                         video = [video]
                 else:
+                    video_file = resolve_media_path(_raw_video, "VIDEO_ROOT")
                     video, video_grid_thw, second_per_grid_ts = self.process_video(video_file, timestamps=timestamps)
                     video = [video]
 
@@ -667,7 +702,13 @@ class LazySupervisedDataset(Dataset):
             fixed_audio_duration = getattr(self.data_args, 'fixed_audio_duration', 0)
 
             if "audio" in sources[0]:
-                audio_file = sources[0]["audio"]
+                _raw_audio = sources[0]["audio"]
+                if isinstance(_raw_audio, list):
+                    audio_file = [
+                        resolve_media_path(f, "AUDIO_ROOT") for f in _raw_audio
+                    ]
+                else:
+                    audio_file = resolve_media_path(_raw_audio, "AUDIO_ROOT")
                 timestamps = sources[0].get("timestamps", None)
                 try:
                     audio, audio_lengths, raw_wav = self.process_audio(audio_file, timestamps=timestamps)

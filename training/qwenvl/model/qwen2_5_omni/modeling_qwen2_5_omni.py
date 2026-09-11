@@ -63,8 +63,17 @@ else:
     flash_attn_varlen_func = None
     apply_rotary_emb = None
 
-from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
-from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+try:
+    from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
+    from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
+except ImportError:
+    LigerCrossEntropyLoss = torch.nn.CrossEntropyLoss
+    def LigerForCausalLMLoss(hidden_states, lm_head_weight, labels, hidden_size=None):
+        logits = torch.matmul(hidden_states, lm_head_weight.t())
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        loss_fct = torch.nn.CrossEntropyLoss()
+        return loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
 if is_torch_flex_attn_available():
     from torch.nn.attention.flex_attention import BlockMask

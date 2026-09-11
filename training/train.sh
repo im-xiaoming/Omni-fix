@@ -19,6 +19,11 @@
 #   LORA_ALPHA       LoRA alpha                         (default: 32)
 #   VIDEO_BLACKLIST  optional path to a one-id-per-line blacklist file
 #
+# Media root dirs (optional – only needed when JSONL contains bare filenames):
+#   VIDEO_ROOT       root directory for video files  (e.g. /data/videos)
+#   AUDIO_ROOT       root directory for audio files  (e.g. /data/audio)
+#   IMAGE_ROOT       root directory for image files  (e.g. /data/images)
+#
 # Example:
 #   WAVE_PATH=/data/WAVE-7B \
 #   BEATS_PATH=/data/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt \
@@ -55,6 +60,11 @@ LR="${LR:-1e-5}"
 LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 USE_TUPLE_INFONCE="${USE_TUPLE_INFONCE:-True}"
+
+# Media root dirs — export so data loader picks them up
+export VIDEO_ROOT="${VIDEO_ROOT:-}"
+export AUDIO_ROOT="${AUDIO_ROOT:-}"
+export IMAGE_ROOT="${IMAGE_ROOT:-}"
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
