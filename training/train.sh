@@ -42,15 +42,24 @@
 
 set -euo pipefail
 
-# --- required env ---
-: "${WAVE_PATH:?Set WAVE_PATH to the WAVE-7B backbone dir}"
-: "${BEATS_PATH:?Set BEATS_PATH to the BEATs checkpoint (.pt)}"
-: "${DATA_PATH:?Set DATA_PATH to the training manifest (.jsonl)}"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
-export BEATS_PATH    # picked up by qwenvl.train.train_qwen
+# --- default paths if not set by environment ---
+WAVE_PATH="${WAVE_PATH:-$(cd -- "${REPO_ROOT}/../../WAVE_HOME/WAVE-7B" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")}"
+BEATS_PATH="${BEATS_PATH:-$(cd -- "${REPO_ROOT}/../../WAVE_HOME" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/WAVE_HOME")/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt}"
+DATA_PATH="${DATA_PATH:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/YouCookII/metadata" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/YouCookII/metadata")/train_omni.jsonl}"
+VIDEO_ROOT="${VIDEO_ROOT:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/YouCookII/videos" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/YouCookII/videos")}"
+AUDIO_ROOT="${AUDIO_ROOT:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/YouCookII/audio" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/YouCookII/audio")}"
+LORA_CKPT="${LORA_CKPT:-$(cd -- "${REPO_ROOT}/../../adapters/omniretriever-7b" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/adapters/omniretriever-7b")}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/output/omniretriever_7b}"
+
+export BEATS_PATH
+export VIDEO_ROOT
+export AUDIO_ROOT
+export IMAGE_ROOT="${IMAGE_ROOT:-}"
 
 # --- optional knobs ---
-OUTPUT_DIR="${OUTPUT_DIR:-./output/omniretriever_7b}"
 NUM_GPUS="${NUM_GPUS:-4}"
 MASTER_PORT="${MASTER_PORT:-29503}"
 EPOCHS="${EPOCHS:-1}"
@@ -59,56 +68,91 @@ GRAD_ACCUM="${GRAD_ACCUM:-8}"
 LR="${LR:-1e-5}"
 LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
-LORA_CKPT="${LORA_CKPT:-No}"
-LORA_INIT_ONLY="${LORA_INIT_ONLY:-False}"
-GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-False}"
+LORA_INIT_ONLY="${LORA_INIT_ONLY:-True}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 USE_TUPLE_INFONCE="${USE_TUPLE_INFONCE:-True}"
 
-# Media root dirs — export so data loader picks them up
-export VIDEO_ROOT="${VIDEO_ROOT:-}"
-export AUDIO_ROOT="${AUDIO_ROOT:-}"
-export IMAGE_ROOT="${IMAGE_ROOT:-}"
-
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-
-deepspeed --num_gpus="${NUM_GPUS}" --master_port="${MASTER_PORT}" \
-  "${REPO_ROOT}/qwenvl/train/train_qwen.py" \
-  --deepspeed "${REPO_ROOT}/configs/ds_zero0.json" \
-  --model_name_or_path "${WAVE_PATH}" \
-  --model_base         "${WAVE_PATH}" \
-  --dataset_use        "${DATA_PATH}" \
-  --bf16 True \
-  --output_dir         "${OUTPUT_DIR}" \
-  --num_train_epochs   "${EPOCHS}" \
-  --per_device_train_batch_size "${BATCH_SIZE}" \
-  --gradient_accumulation_steps "${GRAD_ACCUM}" \
-  --learning_rate      "${LR}" \
-  --weight_decay 0.01 \
-  --warmup_ratio 0.03 \
-  --lr_scheduler_type cosine \
-  --logging_steps 1 \
-  --model_max_length 2048 \
-  --dataloader_num_workers 4 \
-  --train_classify True \
-  --classify_type all_layer \
-  --pred_embeds True \
-  --use_beats True \
-  --tune_beats_proj True \
-  --fixed_audio_duration 8 \
-  --video_max_frames 8 \
-  --video_min_frames 8 \
-  --max_pixels 50176 \
-  --min_pixels 50176 \
-  --use_lora True \
-  --lora_r     "${LORA_R}" \
-  --lora_alpha "${LORA_ALPHA}" \
-  --use_tuple_infonce  "${USE_TUPLE_INFONCE}" \
-  --lora_ckpt "${LORA_CKPT}" \
-  --lora_init_only "${LORA_INIT_ONLY}" \
-  --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
-  --save_strategy steps \
-  --save_steps 1000 \
-  --save_total_limit 5 \
-  --report_to none \
-  "$@"
+if command -v deepspeed &>/dev/null; then
+  echo "Chạy với DeepSpeed (GPUs: ${NUM_GPUS}, Port: ${MASTER_PORT})..."
+  deepspeed --num_gpus="${NUM_GPUS}" --master_port="${MASTER_PORT}" \
+    "${REPO_ROOT}/qwenvl/train/train_qwen.py" \
+    --deepspeed "${REPO_ROOT}/configs/ds_zero0.json" \
+    --model_name_or_path "${WAVE_PATH}" \
+    --model_base         "${WAVE_PATH}" \
+    --dataset_use        "${DATA_PATH}" \
+    --bf16 True \
+    --output_dir         "${OUTPUT_DIR}" \
+    --num_train_epochs   "${EPOCHS}" \
+    --per_device_train_batch_size "${BATCH_SIZE}" \
+    --gradient_accumulation_steps "${GRAD_ACCUM}" \
+    --learning_rate      "${LR}" \
+    --weight_decay 0.01 \
+    --warmup_ratio 0.03 \
+    --lr_scheduler_type cosine \
+    --logging_steps 1 \
+    --model_max_length 2048 \
+    --dataloader_num_workers 4 \
+    --train_classify True \
+    --classify_type all_layer \
+    --pred_embeds True \
+    --use_beats True \
+    --tune_beats_proj True \
+    --fixed_audio_duration 8 \
+    --video_max_frames 8 \
+    --video_min_frames 8 \
+    --max_pixels 50176 \
+    --min_pixels 50176 \
+    --use_lora True \
+    --lora_r     "${LORA_R}" \
+    --lora_alpha "${LORA_ALPHA}" \
+    --use_tuple_infonce  "${USE_TUPLE_INFONCE}" \
+    --lora_ckpt "${LORA_CKPT}" \
+    --lora_init_only "${LORA_INIT_ONLY}" \
+    --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
+    --save_strategy steps \
+    --save_steps 1000 \
+    --save_total_limit 5 \
+    --report_to none \
+    "$@"
+else
+  echo "DeepSpeed không được tìm thấy, chạy trực tiếp bằng Python..."
+  python "${REPO_ROOT}/qwenvl/train/train_qwen.py" \
+    --model_name_or_path "${WAVE_PATH}" \
+    --model_base         "${WAVE_PATH}" \
+    --dataset_use        "${DATA_PATH}" \
+    --bf16 True \
+    --output_dir         "${OUTPUT_DIR}" \
+    --num_train_epochs   "${EPOCHS}" \
+    --per_device_train_batch_size "${BATCH_SIZE}" \
+    --gradient_accumulation_steps "${GRAD_ACCUM}" \
+    --learning_rate      "${LR}" \
+    --weight_decay 0.01 \
+    --warmup_ratio 0.03 \
+    --lr_scheduler_type cosine \
+    --logging_steps 1 \
+    --model_max_length 2048 \
+    --dataloader_num_workers 4 \
+    --train_classify True \
+    --classify_type all_layer \
+    --pred_embeds True \
+    --use_beats True \
+    --tune_beats_proj True \
+    --fixed_audio_duration 8 \
+    --video_max_frames 8 \
+    --video_min_frames 8 \
+    --max_pixels 50176 \
+    --min_pixels 50176 \
+    --use_lora True \
+    --lora_r     "${LORA_R}" \
+    --lora_alpha "${LORA_ALPHA}" \
+    --use_tuple_infonce  "${USE_TUPLE_INFONCE}" \
+    --lora_ckpt "${LORA_CKPT}" \
+    --lora_init_only "${LORA_INIT_ONLY}" \
+    --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
+    --save_strategy steps \
+    --save_steps 1000 \
+    --save_total_limit 5 \
+    --report_to none \
+    "$@"
+fi
+exit $?
