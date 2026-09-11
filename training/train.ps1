@@ -24,6 +24,9 @@ param (
     [int]$LoraR = 16,
     [int]$LoraAlpha = 32,
     [int]$DataLoaderWorkers = 0,
+    [string]$LoraCkpt = $env:LORA_CKPT,
+    [switch]$LoraInitOnly,
+    [bool]$GradientCheckpointing = $true,
     [string]$UseTupleInfonce = "True",
     [switch]$UseDeepspeed,
     [switch]$Bf16,
@@ -39,12 +42,12 @@ if ($Help -or ($WavePath -eq "--help") -or ($WavePath -eq "-h")) {
 Cach su dung train.ps1:
   .\training\train.ps1                                   # Chay voi thong so mac dinh
   .\training\train.ps1 -DryRun                           # Kiem tra path va cau hinh (khong chay train)
-  .\training\train.ps1 -BatchSize 2 -Epochs 3            # Chinh batch size va so epoch
-  .\training\train.ps1 -UseDeepspeed                     # Chay voi deepspeed (neu co)
+  .\training\train.ps1 -LoraCkpt "..\..\adapters\omniretriever-7b" -LoraInitOnly   # Fine-tune tiep tu adapter co san
+  .\training\train.ps1 -BatchSize 1 -GradAccum 8 -GradientCheckpointing            # Tiet kiem VRAM GPU
   .\training\train.ps1 -OutputDir "D:\output\test"       # Thu muc luu checkpoint
 
 Cac bien moi truong tu dong nhan dien:
-  VIDEO_ROOT, AUDIO_ROOT, WAVE_PATH, BEATS_PATH, DATA_PATH
+  VIDEO_ROOT, AUDIO_ROOT, WAVE_PATH, BEATS_PATH, DATA_PATH, LORA_CKPT
 "@
     exit 0
 }
@@ -75,6 +78,10 @@ if (-not $AudioRoot) {
     $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\YouCookII\audio"))
     if (Test-Path $candidate) { $AudioRoot = $candidate } else { $AudioRoot = "D:\Học\KL\Data\YouCookII\YouCookII\audio" }
 }
+if (-not $LoraCkpt) {
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\adapters\omniretriever-7b"))
+    if (Test-Path $candidate) { $LoraCkpt = $candidate } else { $LoraCkpt = "D:\Học\KL\Code\Omni\adapters\omniretriever-7b" }
+}
 if (-not $OutputDir) {
     $OutputDir = "$PSScriptRoot\output\omniretriever_7b"
 }
@@ -85,6 +92,7 @@ $env:BEATS_PATH = $BeatsPath
 $env:DATA_PATH = $DataPath
 $env:VIDEO_ROOT = $VideoRoot
 $env:AUDIO_ROOT = $AudioRoot
+if ($LoraCkpt -and ($LoraCkpt -ne "No")) { $env:LORA_CKPT = $LoraCkpt }
 if ($ImageRoot) { $env:IMAGE_ROOT = $ImageRoot }
 
 $RepoRoot = $PSScriptRoot
@@ -102,6 +110,7 @@ Write-Host "BEATS_PATH : $BeatsPath"
 Write-Host "DATA_PATH  : $DataPath"
 Write-Host "VIDEO_ROOT : $VideoRoot"
 Write-Host "AUDIO_ROOT : $AudioRoot"
+Write-Host "LORA_CKPT  : $LoraCkpt"
 Write-Host "OUTPUT_DIR : $OutputDir"
 Write-Host "BATCH_SIZE : $BatchSize | GRAD_ACCUM: $GradAccum | EPOCHS: $Epochs"
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -115,6 +124,9 @@ if (-not (Test-Path $BeatsPath)) {
 }
 if (-not (Test-Path $DataPath)) {
     Write-Warning "Không tìm thấy file DATA_PATH: $DataPath"
+}
+if ($LoraCkpt -and ($LoraCkpt -ne "No") -and (-not (Test-Path $LoraCkpt))) {
+    Write-Warning "Không tìm thấy thư mục LORA_CKPT: $LoraCkpt"
 }
 
 # Kiểm tra GPU / CUDA
@@ -191,6 +203,13 @@ $trainArgs = @(
     "--save_total_limit", "5",
     "--report_to", "none"
 ) + $precisionArgs
+
+if ($LoraCkpt -and ($LoraCkpt -ne "No")) {
+    $trainArgs += @("--lora_ckpt", "$LoraCkpt", "--lora_init_only", "True")
+}
+if ($GradientCheckpointing) {
+    $trainArgs += @("--gradient_checkpointing", "True")
+}
 
 if ($ExtraArgs) {
     $trainArgs += $ExtraArgs

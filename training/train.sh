@@ -59,6 +59,9 @@ GRAD_ACCUM="${GRAD_ACCUM:-8}"
 LR="${LR:-1e-5}"
 LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
+LORA_CKPT="${LORA_CKPT:-No}"
+LORA_INIT_ONLY="${LORA_INIT_ONLY:-False}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-False}"
 USE_TUPLE_INFONCE="${USE_TUPLE_INFONCE:-True}"
 
 # Media root dirs — export so data loader picks them up
@@ -101,6 +104,9 @@ deepspeed --num_gpus="${NUM_GPUS}" --master_port="${MASTER_PORT}" \
   --lora_r     "${LORA_R}" \
   --lora_alpha "${LORA_ALPHA}" \
   --use_tuple_infonce  "${USE_TUPLE_INFONCE}" \
+  --lora_ckpt "${LORA_CKPT}" \
+  --lora_init_only "${LORA_INIT_ONLY}" \
+  --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
   --save_strategy steps \
   --save_steps 1000 \
   --save_total_limit 5 \
