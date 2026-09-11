@@ -190,6 +190,13 @@ def train(attn_implementation="flash_attention_2"):
 
     if not data_args.run_test:
         model_config = Qwen2_5OmniThinkerConfig.from_pretrained(model_args.model_base, cache_dir=training_args.cache_dir,)
+        if hasattr(model_config, "text_config"):
+            if getattr(model_config.text_config, "pad_token_id", None) is None:
+                model_config.text_config.pad_token_id = getattr(model_config, "pad_token_id", 151643)
+            if getattr(model_config.text_config, "bos_token_id", None) is None:
+                model_config.text_config.bos_token_id = getattr(model_config, "bos_token_id", 151644)
+            if getattr(model_config.text_config, "eos_token_id", None) is None:
+                model_config.text_config.eos_token_id = getattr(model_config, "eos_token_id", 151645)
         if model_args.train_classify:
             model_config.train_classify = model_args.train_classify
             model_config.classify_type = model_args.classify_type

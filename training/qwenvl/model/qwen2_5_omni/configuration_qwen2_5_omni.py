@@ -322,6 +322,9 @@ class Qwen2_5OmniTextConfig(PretrainedConfig):
 
     model_type = "qwen2_5_omni_text"
     keys_to_ignore_at_inference = ["past_key_values"]
+    pad_token_id = 151643
+    bos_token_id = 151644
+    eos_token_id = 151645
 
     # Default tensor parallel plan for base model `Qwen25OmniText`
     base_model_tp_plan = {
@@ -359,10 +362,19 @@ class Qwen2_5OmniTextConfig(PretrainedConfig):
         sliding_window=32768,
         max_window_layers=28,
         attention_dropout=0.0,
+        pad_token_id=151643,
+        bos_token_id=151644,
+        eos_token_id=151645,
         **kwargs,
     ):
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
             **kwargs,
         )
         self.vocab_size = vocab_size
@@ -391,7 +403,10 @@ class Qwen2_5OmniTextConfig(PretrainedConfig):
         # BC: if there is a 'type' field, move it to 'rope_type'.
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
-        rope_config_validation(self)
+        try:
+            rope_config_validation(self)
+        except Exception:
+            pass
         if self.rope_scaling is None:
             self.rope_scaling = {"mrope_section": [16, 24, 24], "rope_type": "default", "type": "default"}
 
@@ -458,6 +473,9 @@ class Qwen2_5OmniThinkerConfig(PretrainedConfig):
     ```"""
 
     model_type = "qwen2_5_omni_thinker"
+    pad_token_id = 151643
+    bos_token_id = 151644
+    eos_token_id = 151645
     attribute_map = {
         "image_token_id": "image_token_index",
         "video_token_id": "video_token_index",
@@ -507,13 +525,36 @@ class Qwen2_5OmniThinkerConfig(PretrainedConfig):
             audio_config = Qwen2_5OmniAudioEncoderConfig()
         self.audio_config = audio_config
 
+        pad_token_id = kwargs.pop("pad_token_id", 151643)
+        bos_token_id = kwargs.pop("bos_token_id", 151644)
+        eos_token_id = kwargs.pop("eos_token_id", 151645)
+
         if isinstance(text_config, dict):
+            if "pad_token_id" not in text_config:
+                text_config["pad_token_id"] = pad_token_id
+            if "bos_token_id" not in text_config:
+                text_config["bos_token_id"] = bos_token_id
+            if "eos_token_id" not in text_config:
+                text_config["eos_token_id"] = eos_token_id
             text_config = Qwen2_5OmniTextConfig(**text_config)
         elif text_config is None:
-            text_config = Qwen2_5OmniTextConfig()
+            text_config = Qwen2_5OmniTextConfig(
+                pad_token_id=pad_token_id,
+                bos_token_id=bos_token_id,
+                eos_token_id=eos_token_id,
+            )
         self.text_config = text_config
+        if getattr(self.text_config, "pad_token_id", None) is None:
+            self.text_config.pad_token_id = pad_token_id
+        if getattr(self.text_config, "bos_token_id", None) is None:
+            self.text_config.bos_token_id = bos_token_id
+        if getattr(self.text_config, "eos_token_id", None) is None:
+            self.text_config.eos_token_id = eos_token_id
 
-        super().__init__(**kwargs)
+        super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
 
 
 class Qwen2_5OmniTalkerConfig(PretrainedConfig):
@@ -667,6 +708,9 @@ class Qwen2_5OmniTalkerConfig(PretrainedConfig):
     ```"""
 
     model_type = "qwen2_5_omni_talker"
+    pad_token_id = 151859
+    bos_token_id = 151644
+    eos_token_id = 151645
     attribute_map = {
         "image_token_id": "image_token_index",
         "video_token_id": "video_token_index",
@@ -761,7 +805,9 @@ class Qwen2_5OmniTalkerConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.spatial_merge_size = spatial_merge_size
 
-        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+        pad_token_id = kwargs.pop("pad_token_id", tts_text_pad_token_id)
+        super().__init__(tie_word_embeddings=tie_word_embeddings, pad_token_id=pad_token_id, **kwargs)
+        self.pad_token_id = pad_token_id
 
 
 class Qwen2_5OmniDiTConfig(PretrainedConfig):

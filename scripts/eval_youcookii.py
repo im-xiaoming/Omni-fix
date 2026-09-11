@@ -114,6 +114,13 @@ def main():
     # 2. Load Model
     print("\n[2/4] Loading Model & Adapter...")
     model_config = Qwen2_5OmniThinkerConfig.from_pretrained(args.base_model)
+    if hasattr(model_config, "text_config"):
+        if getattr(model_config.text_config, "pad_token_id", None) is None:
+            model_config.text_config.pad_token_id = getattr(model_config, "pad_token_id", 151643)
+        if getattr(model_config.text_config, "bos_token_id", None) is None:
+            model_config.text_config.bos_token_id = getattr(model_config, "bos_token_id", 151644)
+        if getattr(model_config.text_config, "eos_token_id", None) is None:
+            model_config.text_config.eos_token_id = getattr(model_config, "eos_token_id", 151645)
     model_config.train_classify = True
     model_config.classify_type = "all_layer"
     model_config.audio_config.beats_path = args.beats_path
