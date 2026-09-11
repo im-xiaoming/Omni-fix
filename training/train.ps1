@@ -129,10 +129,14 @@ try {
 } catch {}
 
 if (-not $hasCuda) {
-    Write-Warning "LƯU Ý QUAN TRỌNG: Môi trường Python hiện tại không có GPU NVIDIA CUDA (đang dùng CPU)."
-    Write-Warning "Mô hình WAVE-7B có 7 tỉ tham số (~14GB weights), chạy train trên CPU máy tính cá nhân"
-    Write-Warning "sẽ rất dễ bị tràn RAM (OOM) hoặc cực kỳ chậm."
-    Write-Warning "Nếu muốn fine-tune thực tế, bạn nên chạy trên máy có GPU NVIDIA (>= 16GB-24GB VRAM) hoặc dùng Cloud GPU / WSL2."
+
+    Write-Warning "IMPORTANT NOTICE: The current Python environment does not have an NVIDIA CUDA GPU (CPU only)."
+    Write-Warning "The WAVE-7B model has 7 billion parameters (~14 GB of weights), so training"
+    Write-Warning "it on a personal computer using CPU may easily cause an out-of-memory (OOM) error"
+    Write-Warning "or be extremely slow."
+    Write-Warning "For practical fine-tuning, you should use a machine with an NVIDIA GPU"
+    Write-Warning "(>= 16 GB-24 GB VRAM) or use a Cloud GPU / WSL2."
+
 }
 
 # Tạo thư mục output nếu chưa có

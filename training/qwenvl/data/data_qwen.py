@@ -570,33 +570,42 @@ class LazySupervisedDataset(Dataset):
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         import signal
-        old_handler = signal.signal(signal.SIGALRM, self._getitem_timeout_handler)
-        signal.alarm(30)
+        _HAS_SIGALRM = hasattr(signal, "SIGALRM")  # False on Windows
+        if _HAS_SIGALRM:
+            old_handler = signal.signal(signal.SIGALRM, self._getitem_timeout_handler)
+            signal.alarm(30)
         try:
             sample = self._get_item(i)
-            signal.alarm(0)
+            if _HAS_SIGALRM:
+                signal.alarm(0)
         except Exception as e:
-            signal.alarm(0)
+            if _HAS_SIGALRM:
+                signal.alarm(0)
             print(f"[{'TIMEOUT' if isinstance(e, TimeoutError) else 'ERROR'}] Sample {i} failed: {e}, replacing", flush=True)
-            # Try a random replacement sample (with its own timeout)
+            # Try a random replacement sample
             for _retry in range(3):
                 try:
                     randidx = random.choice(self.type_dict.get(
                         self.list_data_dict[i].get("type", "retrieval"), list(range(len(self.list_data_dict)))))
-                    signal.alarm(30)
+                    if _HAS_SIGALRM:
+                        signal.alarm(30)
                     sample = self._get_item(randidx)
-                    signal.alarm(0)
+                    if _HAS_SIGALRM:
+                        signal.alarm(0)
                     break
                 except Exception:
-                    signal.alarm(0)
+                    if _HAS_SIGALRM:
+                        signal.alarm(0)
                     continue
             else:
                 # All retries failed — return first sample as last resort
-                signal.alarm(0)
+                if _HAS_SIGALRM:
+                    signal.alarm(0)
                 sample = self._get_item(0)
         finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
+            if _HAS_SIGALRM:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
         return sample
 
     def _get_item(self, i) -> Dict[str, torch.Tensor]:
@@ -610,8 +619,12 @@ class LazySupervisedDataset(Dataset):
             _vid = sources[0].get("video", "")
             if _vid:
                 _log_path = os.environ.get("DATA_LOADING_LOG", "./tmp/data_loading.log")
-                with open(_log_path, "a") as _logf:
-                    _logf.write(f"{os.getpid()} {i} {_vid}\n")
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(_log_path)), exist_ok=True)
+                    with open(_log_path, "a") as _logf:
+                        _logf.write(f"{os.getpid()} {i} {_vid}\n")
+                except Exception:
+                    pass  # Non-critical logging, ignore errors
 
             # define some variables
             image = None
