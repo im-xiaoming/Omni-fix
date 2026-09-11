@@ -59,6 +59,12 @@ class InferenceConfig:
             floor is the released configuration, and pinning cost ``v2t`` 0.087
             R@1 on a 300-record run. See
             ``omniretriever.inference.encode._video_kwargs``.
+        append_turn_end: whether to close each prompt with the tokeniser's
+            ``<|im_end|>``, as the training pipeline does. Added downstream; the
+            fusion head pools a fixed final position, so without it the
+            embedding is read out of a different token for every modality. Not
+            applied on the ``av`` path, which cannot take a trailing token. See
+            ``omniretriever.inference.encode._turn_end``.
         media_instruction: filler placed next to a media placeholder when the
             combination carries no caption. Added downstream to match the
             training recipe; set it to ``""`` to reproduce the released
@@ -86,6 +92,7 @@ class InferenceConfig:
     embed_dim: int = DEFAULT_EMBED_DIM
     normalize: bool = True
     precision: str = "bfloat16"
+    append_turn_end: bool = True
     media_instruction: str = "Please describe the video."
     instruction_paths: tuple[str, ...] = ("audio", "av")
     duplicate_audio_tokens: bool = False
@@ -129,6 +136,7 @@ class OmniRetriever:
         duplicate_audio_tokens: bool = False,
         pin_video_resolution: bool = False,
         instruction_paths: Sequence[str] = ("audio", "av"),
+        append_turn_end: bool = True,
     ) -> "OmniRetriever":
         """Load WAVE-7B and apply the OmniRetriever LoRA adapter.
 
@@ -162,6 +170,7 @@ class OmniRetriever:
             duplicate_audio_tokens=duplicate_audio_tokens,
             pin_video_resolution=pin_video_resolution,
             instruction_paths=tuple(instruction_paths),
+            append_turn_end=append_turn_end,
         )
 
         logger.info("Loading WAVE-7B backbone from %s", base_model)

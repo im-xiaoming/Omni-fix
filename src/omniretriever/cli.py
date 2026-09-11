@@ -70,6 +70,7 @@ def extract_main(argv: list[str] | None = None) -> int:
         duplicate_audio_tokens=args.duplicate_audio_tokens,
         pin_video_resolution=args.pin_video_resolution,
         instruction_paths=args.instruction_paths,
+        append_turn_end=args.append_turn_end,
     )
     # tv and at take two arguments, so their batches arrive as (media, caption)
     # pairs and are transposed back into two parallel lists here.
@@ -331,6 +332,16 @@ def _build_extract_parser() -> argparse.ArgumentParser:
         type=int,
         default=25,
         help="Write the partial .npz every N batches (default 25).",
+    )
+    parser.add_argument(
+        "--no-turn-end",
+        dest="append_turn_end",
+        action="store_false",
+        help=(
+            "Reproduce the released prompts, which omit the <|im_end|> that training put at the "
+            "end of every turn. The fusion head pools a fixed final position, so omitting it "
+            "reads the embedding out of a different token per modality. Use it only to A/B."
+        ),
     )
     parser.add_argument(
         "--instruction-paths",

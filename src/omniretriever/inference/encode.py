@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 def encode_text(backbone, processor, text, config):
     """Encode a string (or list of strings) into the shared embedding space."""
-    texts = _as_list(text)
+    end = _turn_end(processor, config)
+    texts = [t + end for t in _as_list(text)]
     inputs = processor(text=texts, padding=True, return_tensors="pt").to(_device(backbone))
     return _forward_and_normalise(backbone, inputs, config)
 
@@ -40,7 +41,8 @@ def encode_video(backbone, processor, video_path, config):
     paths = _as_list(video_path)
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution) for p in paths]
-    prompts = [_video_prompt(processor, _instruction(config, "video"))] * len(paths)
+    suffix = _instruction(config, "video") + _turn_end(processor, config)
+    prompts = [_video_prompt(processor, suffix)] * len(paths)
     inputs = processor(
         text=prompts,
         videos=frames,
@@ -57,7 +59,8 @@ def encode_audio(backbone, processor, audio_path, config):
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
                                      sample_rate=config.audio_sample_rate) for p in paths]
-    prompts = [_audio_prompt(processor, _instruction(config, "audio"))] * len(paths)
+    suffix = _instruction(config, "audio") + _turn_end(processor, config)
+    prompts = [_audio_prompt(processor, suffix)] * len(paths)
     inputs = processor(
         text=prompts,
         audio=waveforms,
@@ -145,7 +148,8 @@ def encode_tv(backbone, processor, video_path, text, config):
     paths, texts = _pair(video_path, text, "video_path", "text")
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution) for p in paths]
-    prompts = [_video_prompt(processor, t) for t in texts]
+    end = _turn_end(processor, config)
+    prompts = [_video_prompt(processor, t + end) for t in texts]
     inputs = processor(
         text=prompts,
         videos=frames,
@@ -170,7 +174,8 @@ def encode_at(backbone, processor, audio_path, text, config):
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
                                      sample_rate=config.audio_sample_rate) for p in paths]
-    prompts = [_audio_prompt(processor, t) for t in texts]
+    end = _turn_end(processor, config)
+    prompts = [_audio_prompt(processor, t + end) for t in texts]
     inputs = processor(
         text=prompts,
         audio=waveforms,
@@ -208,6 +213,30 @@ def _pair(media, text, media_name: str, text_name: str) -> tuple[list, list]:
 # training. Table S2 of the paper counts it too, describing the joint AV input as
 # "video + audio + prompt".
 MEDIA_INSTRUCTION = "Please describe the video."
+
+
+def _turn_end(processor, config) -> str:
+    """The token training put at the end of every prompt, or an empty string.
+
+    ADDED downstream, and the single most consequential prompt difference found
+    against ``training/qwenvl/data/data_qwen.py``. Upstream builds each prompt
+    with ``apply_chat_template`` and then keeps everything after
+    ``"<|im_start|>user
+"``, which leaves the turn's closing ``<|im_end|>`` on
+    the end. The released ``encode_*`` helpers never add it.
+
+    That matters because the fusion head reads a fixed final position,
+    ``hidden_states[:, -1, :]``. In training that position is always the same
+    token; at inference it is whatever the prompt happens to end with, and it
+    differs per modality -- the caption's last word for text, ``<|vision_eos|>``
+    for video, a full stop for audio. The embedding is being read out of a
+    position the model was never trained to write it to.
+
+    Not applied on the ``av`` path: as with the filler, the backbone's M-RoPE
+    index cannot place any trailing token once audio is interleaved into the
+    video stream, and it fails on a shape mismatch of exactly one token.
+    """
+    return processor.tokenizer.eos_token if config.append_turn_end else ""
 
 
 def _instruction(config, path: str) -> str:
