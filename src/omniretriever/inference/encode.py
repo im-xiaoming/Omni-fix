@@ -44,7 +44,7 @@ def encode_video(backbone, processor, video_path, config):
     inputs = processor(
         text=prompts,
         videos=frames,
-        size=_video_size(config),
+        **_video_kwargs(config),
         padding=True,
         return_tensors="pt",
     ).to(_device(backbone))
@@ -94,7 +94,7 @@ def encode_av(backbone, processor, clip_path, config):
         videos=frames,
         audio=waveforms,
         sampling_rate=config.audio_sample_rate,
-        size=_video_size(config),
+        **_video_kwargs(config),
         use_audio_in_video=True,
         padding=True,
         return_tensors="pt",
@@ -149,7 +149,7 @@ def encode_tv(backbone, processor, video_path, text, config):
     inputs = processor(
         text=prompts,
         videos=frames,
-        size=_video_size(config),
+        **_video_kwargs(config),
         padding=True,
         return_tensors="pt",
     ).to(_device(backbone))
@@ -222,22 +222,33 @@ def _audio_prompt(processor, suffix: str = "") -> str:
     return processor.audio_bos_token + processor.audio_token + processor.audio_eos_token + suffix
 
 
-def _video_size(config) -> dict:
-    """Pixel budget that keeps a frame at ``config.video_resolution``.
-
-    ADDED downstream. Left to itself the video processor rescales a 224 px frame
-    up to 336 px, which turns the 8-frame clip into 576 language-model tokens
-    instead of 256. Table S2 of the paper puts a video-only forward at about 268
-    tokens, i.e. 256 visual tokens plus the placeholder pair and the filler
-    prompt, so the default rescale more than doubles the visual budget the model
-    was trained on. ``max_pixels`` is ignored by this processor version; only a
-    ``size`` dict takes effect.
-    """
-    edge = config.video_resolution
-    return {"shortest_edge": _MIN_PIXELS, "longest_edge": edge * edge}
-
-
 _MIN_PIXELS = 3136
+
+
+def _video_kwargs(config) -> dict:
+    """Processor kwargs controlling the visual token budget.
+
+    Empty by default, which leaves the processor on the pixel budget WAVE-7B
+    ships: ``min_pixels = 128 * 28 * 28``. That floor is 100352 pixels, so a
+    224 px frame (50176) is rescaled up to 336 px and an 8-frame clip becomes
+    576 language-model tokens rather than 256.
+
+    That rescale looks like a bug against Table S2 of the paper, which puts a
+    video-only forward at about 268 tokens, i.e. 256 visual tokens plus the
+    placeholder pair and the filler. It is not: the same floor appears in the
+    ``processing_qwen2_5_omni.py`` the model directory ships and in the
+    ``transformers`` build of it, so 336 px is the released configuration and
+    the paper's number is the outlier. Pinning the budget measurably hurt, too:
+    on a 300-record run it cost ``v2t`` 0.087 R@1 while leaving ``t2v`` flat.
+
+    Set ``InferenceConfig.pin_video_resolution`` to override the floor and hold
+    frames at ``video_resolution``. ``max_pixels`` is ignored by this processor
+    version; only a ``size`` dict takes effect.
+    """
+    if not config.pin_video_resolution:
+        return {}
+    edge = config.video_resolution
+    return {"size": {"shortest_edge": _MIN_PIXELS, "longest_edge": edge * edge}}
 
 
 def _apply_beats_audio_slots(inputs, processor, backbone, config):

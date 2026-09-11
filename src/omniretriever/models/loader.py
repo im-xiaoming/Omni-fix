@@ -53,6 +53,12 @@ class InferenceConfig:
         normalize: whether to L2-normalize the output embedding.
         precision: numerical precision (one of ``"float32"``, ``"bfloat16"``,
             ``"float16"``).
+        pin_video_resolution: whether to hold frames at ``video_resolution``
+            instead of the pixel floor WAVE-7B ships, which rescales 224 px up
+            to 336 px (576 visual tokens rather than 256). Off by default: the
+            floor is the released configuration, and pinning cost ``v2t`` 0.087
+            R@1 on a 300-record run. See
+            ``omniretriever.inference.encode._video_kwargs``.
         media_instruction: filler appended after a media placeholder when the
             combination carries no caption. Added downstream to match the
             training recipe; set it to ``""`` to reproduce the released
@@ -75,6 +81,7 @@ class InferenceConfig:
     precision: str = "bfloat16"
     media_instruction: str = "Please describe the video."
     duplicate_audio_tokens: bool = False
+    pin_video_resolution: bool = False
 
     extra: dict = field(default_factory=dict)
 
@@ -112,6 +119,7 @@ class OmniRetriever:
         dtype: str = "bfloat16",
         config: InferenceConfig | None = None,
         duplicate_audio_tokens: bool = False,
+        pin_video_resolution: bool = False,
     ) -> "OmniRetriever":
         """Load WAVE-7B and apply the OmniRetriever LoRA adapter.
 
@@ -121,8 +129,10 @@ class OmniRetriever:
             device: PyTorch device string.
             dtype: precision (one of ``float32`` / ``bfloat16`` / ``float16``).
             config: optional :class:`InferenceConfig` override. When given, it
-                is used as-is and ``duplicate_audio_tokens`` is ignored.
+                is used as-is and the two flags below are ignored.
             duplicate_audio_tokens: see the field of the same name on
+                :class:`InferenceConfig`.
+            pin_video_resolution: see the field of the same name on
                 :class:`InferenceConfig`.
 
         Returns:
@@ -137,7 +147,9 @@ class OmniRetriever:
 
         torch_dtype = _resolve_dtype(dtype)
         config = config or InferenceConfig(
-            precision=dtype, duplicate_audio_tokens=duplicate_audio_tokens
+            precision=dtype,
+            duplicate_audio_tokens=duplicate_audio_tokens,
+            pin_video_resolution=pin_video_resolution,
         )
 
         logger.info("Loading WAVE-7B backbone from %s", base_model)

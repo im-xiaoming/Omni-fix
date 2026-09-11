@@ -68,6 +68,7 @@ def extract_main(argv: list[str] | None = None) -> int:
         device=args.device,
         dtype=args.dtype,
         duplicate_audio_tokens=args.duplicate_audio_tokens,
+        pin_video_resolution=args.pin_video_resolution,
     )
     # tv and at take two arguments, so their batches arrive as (media, caption)
     # pairs and are transposed back into two parallel lists here.
@@ -236,6 +237,16 @@ def _build_extract_parser() -> argparse.ArgumentParser:
         type=int,
         default=25,
         help="Write the partial .npz every N batches (default 25).",
+    )
+    parser.add_argument(
+        "--pin-video-resolution",
+        action="store_true",
+        help=(
+            "Hold frames at --video-resolution instead of the pixel floor WAVE-7B ships, which "
+            "rescales 224 px up to 336 px (576 visual tokens rather than 256). Off by default: "
+            "the floor is the released configuration, and pinning cost v2t 0.087 R@1 on a "
+            "300-record run. Use it only to A/B."
+        ),
     )
     parser.add_argument(
         "--duplicate-audio-tokens",
