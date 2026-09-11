@@ -110,6 +110,37 @@ class QwenVLTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.skip_deepspeed_load = skip_deepspeed_load
 
+    def set_initial_training_values(self, args, train_dataloader, total_train_batch_size=None):
+        try:
+            if total_train_batch_size is not None:
+                return super().set_initial_training_values(args, train_dataloader, total_train_batch_size)
+            else:
+                return super().set_initial_training_values(args, train_dataloader)
+        except TypeError:
+            res = super().set_initial_training_values(args, train_dataloader)
+            (
+                num_train_epochs,
+                num_update_steps_per_epoch,
+                num_examples,
+                num_train_samples,
+                total_train_batch_size_out,
+                steps_in_epoch,
+                max_steps,
+            ) = res
+            len_dataloader = len(train_dataloader) if has_length(train_dataloader) else None
+            epoch_based = args.max_steps < 0
+            if total_train_batch_size is not None:
+                return (
+                    num_train_epochs,
+                    num_update_steps_per_epoch,
+                    num_examples,
+                    num_train_samples,
+                    epoch_based,
+                    len_dataloader,
+                    max_steps,
+                )
+            return res
+
     def _get_train_sampler(self, train_dataset: Optional[torch.utils.data.Dataset] = None) -> Optional[torch.utils.data.Sampler]:
         # transformers >=4.55 passes train_dataset as a positional/kw arg; older
         # versions called this with no extra arg. Accept both signatures.
@@ -386,18 +417,33 @@ class QwenVLTrainer(Trainer):
         # number of training steps per epoch: num_update_steps_per_epoch
         # total number of training steps to execute: max_steps
         total_train_batch_size = self._train_batch_size * args.gradient_accumulation_steps * args.world_size
-        (
-            num_train_epochs,
-            num_update_steps_per_epoch,
-            num_examples,
-            num_train_samples,
-            epoch_based,
-            len_dataloader,
-            max_steps,
-        ) = self.set_initial_training_values(args, train_dataloader, total_train_batch_size)
+        len_dataloader = len(train_dataloader) if has_length(train_dataloader) else None
+        epoch_based = args.max_steps < 0
+        try:
+            (
+                num_train_epochs,
+                num_update_steps_per_epoch,
+                num_examples,
+                num_train_samples,
+                epoch_based,
+                len_dataloader,
+                max_steps,
+            ) = self.set_initial_training_values(args, train_dataloader, total_train_batch_size)
+        except TypeError:
+            (
+                num_train_epochs,
+                num_update_steps_per_epoch,
+                num_examples,
+                num_train_samples,
+                total_train_batch_size,
+                steps_in_epoch,
+                max_steps,
+            ) = self.set_initial_training_values(args, train_dataloader)
+            len_dataloader = len(train_dataloader) if has_length(train_dataloader) else None
+            epoch_based = args.max_steps < 0
 
         num_train_tokens = None
-        if self.args.include_tokens_per_second:
+        if getattr(self.args, "include_tokens_per_second", False) and hasattr(self, "num_tokens"):
             num_train_tokens = self.num_tokens(train_dataloader, None if epoch_based else max_steps)
             # If going by epochs, multiply tokens linearly
             if len_dataloader is not None and epoch_based:
