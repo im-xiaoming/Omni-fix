@@ -2,6 +2,8 @@
 # Inference users do not need any of these.
 
 deepspeed>=0.15.0
+# Keep the Qwen2.5-Omni processor and image processor on the same API.
+transformers==4.51.3
 peft>=0.13.0
 accelerate>=0.34.0
 datasets>=2.20.0

@@ -218,6 +218,52 @@ class QwenVLTrainer(Trainer):
             # mtime is not reliable especially on some fuse fs in cloud environments.
             self._rotate_checkpoints(use_mtime=False, output_dir=run_dir)
 
+    def _sorted_checkpoints(self, use_mtime=False, output_dir=None):
+        """Return checkpoint directories in ascending checkpoint-step order.
+
+        Transformers removed this private helper in newer releases, but this
+        trainer still needs it for ``save_total_limit`` handling.
+        """
+        output_dir = output_dir or self.args.output_dir
+        if not os.path.isdir(output_dir):
+            return []
+
+        checkpoints = []
+        pattern = re.compile(rf"^{re.escape(PREFIX_CHECKPOINT_DIR)}-(\d+)$")
+        for name in os.listdir(output_dir):
+            match = pattern.match(name)
+            if match and os.path.isdir(os.path.join(output_dir, name)):
+                checkpoints.append((int(match.group(1)), os.path.join(output_dir, name)))
+
+        checkpoints.sort(key=lambda item: item[0])
+        if use_mtime:
+            checkpoints.sort(key=lambda item: os.path.getmtime(item[1]))
+        return [path for _, path in checkpoints]
+
+    def _rotate_checkpoints(self, use_mtime=False, output_dir=None):
+        """Delete the oldest checkpoints while respecting the best checkpoint."""
+        save_total_limit = self.args.save_total_limit
+        if save_total_limit is None or save_total_limit <= 0:
+            return
+
+        checkpoints_sorted = self._sorted_checkpoints(
+            use_mtime=use_mtime, output_dir=output_dir
+        )
+        if len(checkpoints_sorted) <= save_total_limit:
+            return
+
+        checkpoints_to_delete = checkpoints_sorted[: len(checkpoints_sorted) - save_total_limit]
+        best_checkpoint = self.state.best_model_checkpoint
+        for checkpoint in checkpoints_to_delete:
+            if (
+                best_checkpoint
+                and os.path.exists(best_checkpoint)
+                and os.path.samefile(checkpoint, best_checkpoint)
+            ):
+                continue
+            logger.info("Deleting older checkpoint [%s] due to save_total_limit", checkpoint)
+            shutil.rmtree(checkpoint)
+
     def create_optimizer(self):
         opt_model = self.model
 
