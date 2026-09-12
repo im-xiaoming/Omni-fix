@@ -85,13 +85,16 @@ def encode_av(backbone, processor, clip_path, config):
     # With use_audio_in_video the processor rewrites the plain video placeholder
     # into interleaved video/audio chunks itself, so the prompt stays the
     # video-only one and must not carry a separate audio placeholder.
-    # The filler goes *before* the placeholder on this path only. Everywhere else
-    # it follows the media, as training does, but the backbone's own M-RoPE index
-    # cannot place trailing text once audio is interleaved into the video stream:
-    # get_rope_index over-counts the interleaved chunks, skips its trailing-text
-    # branch, and dies on a shape mismatch exactly the length of the filler.
-    # Leading text goes through the same function without complaint.
-    prompts = [_instruction(config, "av") + _video_prompt(processor)] * len(paths)
+    #
+    # The layout here matches every other path -- media, then filler, then the
+    # turn-end token -- but only because the backbone's M-RoPE index has been
+    # patched. Unpatched, it over-counts the interleaved chunks and drops any
+    # trailing token, which used to force the filler in front of the placeholder
+    # and left this the one path that could not be given the token the fusion
+    # head is trained to pool. See scripts/patch_wave_rope.py.
+    _require_rope_patch(backbone)
+    suffix = _instruction(config, "av") + _turn_end(processor, config)
+    prompts = [_video_prompt(processor, suffix)] * len(paths)
     inputs = processor(
         text=prompts,
         videos=frames,
@@ -213,6 +216,39 @@ def _pair(media, text, media_name: str, text_name: str) -> tuple[list, list]:
 # training. Table S2 of the paper counts it too, describing the joint AV input as
 # "video + audio + prompt".
 MEDIA_INSTRUCTION = "Please describe the video."
+
+
+_ROPE_PATCH_MARKER = "PATCHED: `st` over-counts"
+_rope_patch_checked: set = set()
+
+
+def _require_rope_patch(backbone) -> None:
+    """Fail early, and legibly, when the AV path would hit the M-RoPE bug.
+
+    The unpatched ``get_rope_index`` drops any token after the interleaved
+    audio/video block, and the failure surfaces deep inside the forward pass as
+    a bare shape mismatch. Checking the source here turns that into a sentence
+    naming the fix.
+    """
+    import inspect
+
+    key = type(backbone).__name__
+    if key in _rope_patch_checked:
+        return
+    try:
+        source = inspect.getsource(backbone.get_rope_index)
+    except (OSError, TypeError, AttributeError):  # not introspectable; let it run
+        _rope_patch_checked.add(key)
+        return
+    if _ROPE_PATCH_MARKER not in source:
+        raise RuntimeError(
+            "The WAVE-7B remote code is unpatched, so the av path cannot carry a "
+            "trailing token and the forward pass would fail on a shape mismatch. "
+            "Run `python scripts/patch_wave_rope.py <WAVE-7B dir>` once against the "
+            "model directory, or pass --instruction-paths without 'av' together "
+            "with --no-turn-end to fall back to the released layout."
+        )
+    _rope_patch_checked.add(key)
 
 
 def _turn_end(processor, config) -> str:
