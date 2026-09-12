@@ -362,7 +362,16 @@ def train(attn_implementation="flash_attention_2"):
         # output_dir already has checkpoints, we must let DeepSpeed load them
         # (otherwise optimizer / RNG state wouldn't be restored).
         _local_ckpts_for_skip = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
-        _skip_ds_load = (model_args.lora_ckpt != "No") and (len(_local_ckpts_for_skip) == 0)
+        # Init-only deliberately starts a fresh optimizer/scheduler. Existing
+        # checkpoints may have been created with a different set of trainable
+        # parameters (for example before lora_only was enabled).
+        _skip_ds_load = (
+            model_args.lora_ckpt != "No"
+            and (
+                getattr(model_args, "lora_init_only", False)
+                or len(_local_ckpts_for_skip) == 0
+            )
+        )
         trainer = QwenVLTrainer(
             model=model, processing_class=tokenizer, args=training_args,
             callbacks=[LossProgressCallback()],
@@ -383,7 +392,7 @@ def train(attn_implementation="flash_attention_2"):
         #     resume the trainer state from it as well.
         # (4) Pure cold start.
         local_ckpts = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
-        if local_ckpts:
+        if local_ckpts and not getattr(model_args, "lora_init_only", False):
             logging.info(f"Local checkpoint(s) found in {training_args.output_dir} "
                          f"({len(local_ckpts)} ckpts); resuming from the latest.")
             trainer.train(resume_from_checkpoint=True)
