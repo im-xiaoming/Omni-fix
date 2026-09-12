@@ -33,6 +33,19 @@ import copy
 from torch.utils.data import DataLoader
 from transformers import TrainerCallback
 
+# Configure logging early so that INFO messages are displayed on rank 0
+_rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+    level=logging.INFO if _rank == 0 else logging.WARNING,
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+if _rank == 0:
+    transformers.logging.set_verbosity_info()
+else:
+    transformers.logging.set_verbosity_warning()
+
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
@@ -75,9 +88,21 @@ def collate_fn(batch):
         batch[0]["input_raw_wav"] = [batch[0]["input_raw_wav"]]
     return batch[0]
 
-def rank0_print(*args):
-    if local_rank == 0:
-        print(*args)
+def is_rank_zero():
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank() == 0
+    rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", None))
+    if rank is not None:
+        try:
+            return int(rank) == 0
+        except ValueError:
+            pass
+    return local_rank == 0 or local_rank is None
+
+def rank0_print(*args, **kwargs):
+    if is_rank_zero():
+        kwargs.setdefault("flush", True)
+        print(*args, **kwargs)
 
 def apply_liger_kernel_to_qwen2_5_vl(
     rope: bool = True,
@@ -181,14 +206,17 @@ def train(attn_implementation="flash_attention_2"):
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
 
+    rank0_print(f"[1/5] Loading processor & tokenizer from {model_args.model_base}...")
     processor = Qwen2_5OmniProcessor.from_pretrained(model_args.model_base)
     data_args.omni_processor = processor
     tokenizer = processor.tokenizer
     tokenizer.model_max_length = training_args.model_max_length
 
+    rank0_print(f"[2/5] Building dataset and dataloader from {data_args.dataset_use}...")
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
 
     if not data_args.run_test:
+        rank0_print(f"[3/5] Loading base model config & weights from {model_args.model_name_or_path}...")
         model_config = Qwen2_5OmniThinkerConfig.from_pretrained(model_args.model_base, cache_dir=training_args.cache_dir,)
         if hasattr(model_config, "text_config"):
             if getattr(model_config.text_config, "pad_token_id", None) is None:
@@ -221,6 +249,7 @@ def train(attn_implementation="flash_attention_2"):
         model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(model_args.model_name_or_path, config=model_config, cache_dir=training_args.cache_dir, torch_dtype=(torch.bfloat16 if training_args.bf16 else None), attn_implementation=attn_implementation)
 
         if model_args.use_beats:
+            rank0_print(f"[4/5] Loading BEATs audio encoder checkpoint from {model_config.audio_config.beats_path}...")
             beats_ckpt = torch.load(model_config.audio_config.beats_path, map_location='cpu', weights_only=False)
             model.beats.load_state_dict(beats_ckpt['model'])
 
@@ -239,7 +268,9 @@ def train(attn_implementation="flash_attention_2"):
             else:
                 training_args.gradient_checkpointing_kwargs["use_reentrant"] = False
 
+        rank0_print("[5/5] Configuring model adapters / LoRA...")
         if model_args.lora_ckpt != "No":
+            rank0_print(f"Loading pretrained LoRA checkpoint from {model_args.lora_ckpt}...")
             model = PeftModel.from_pretrained(model, model_args.lora_ckpt, is_trainable=True)
 
         set_model(model_args, model)
@@ -325,25 +356,25 @@ def train(attn_implementation="flash_attention_2"):
         # ───────────────────────────────────────────────────────────────────
 
         # ── Trainable parameter report (rank-0 only) ───────────────────────
-        if dist.get_rank() == 0:
+        if is_rank_zero():
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
             trainable_pct = 100.0 * trainable_params / total_params if total_params > 0 else 0.0
-            print("\n" + "=" * 70)
-            print("  TRAINABLE PARAMETER REPORT")
-            print("=" * 70)
-            print(f"  Total parameters    : {total_params:,}")
-            print(f"  Trainable params    : {trainable_params:,}")
-            print(f"  Trainable %         : {trainable_pct:.4f}%")
-            print("-" * 70)
-            print("  Trainable parameter list:")
+            print("\n" + "=" * 70, flush=True)
+            print("  TRAINABLE PARAMETER REPORT", flush=True)
+            print("=" * 70, flush=True)
+            print(f"  Total parameters    : {total_params:,}", flush=True)
+            print(f"  Trainable params    : {trainable_params:,}", flush=True)
+            print(f"  Trainable %         : {trainable_pct:.4f}%", flush=True)
+            print("-" * 70, flush=True)
+            print("  Trainable parameter list:", flush=True)
             trainable_cnt = 0
             for name, p in model.named_parameters():
                 if p.requires_grad:
-                    print(f"    {name}  {list(p.shape)}")
+                    print(f"    {name}  {list(p.shape)}", flush=True)
                     trainable_cnt += 1
-            print(f"  (Total trainable tensors: {trainable_cnt})")
-            print("=" * 70 + "\n")
+            print(f"  (Total trainable tensors: {trainable_cnt})", flush=True)
+            print("=" * 70 + "\n", flush=True)
         
         class LossProgressCallback(TrainerCallback):
             def on_log(self, args, state, control, logs=None, **kwargs):
@@ -355,7 +386,11 @@ def train(attn_implementation="flash_attention_2"):
                            f"obj3={logs.get('obj3_bi',0):.4f} "
                            f"grad={logs.get('grad_norm',0):.4f} "
                            f"lr={logs.get('learning_rate',0):.2e}")
-                    print(msg, flush=True)
+                    try:
+                        from tqdm import tqdm
+                        tqdm.write(msg)
+                    except Exception:
+                        print(msg, flush=True)
 
         # skip_deepspeed_load is only meaningful when we're starting from an
         # external lora_ckpt AND have no local checkpoint to resume from. If
@@ -391,6 +426,7 @@ def train(attn_implementation="flash_attention_2"):
         # (3) Otherwise, if an external lora_ckpt was given without init_only,
         #     resume the trainer state from it as well.
         # (4) Pure cold start.
+        rank0_print(f"Starting training loop (epochs: {training_args.num_train_epochs}, batch_size: {training_args.per_device_train_batch_size}, grad_accum: {training_args.gradient_accumulation_steps}, lr: {training_args.learning_rate})...")
         local_ckpts = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
         if local_ckpts and not getattr(model_args, "lora_init_only", False):
             logging.info(f"Local checkpoint(s) found in {training_args.output_dir} "

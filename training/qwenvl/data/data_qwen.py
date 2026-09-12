@@ -53,11 +53,21 @@ if __name__ == "__main__":
 
 from qwenvl.train.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, VIDEO_TOKEN_INDEX, PAD_TOKEN_ID, DEFAULT_IMAGE_TOKEN, DEFAULT_VIDEO_TOKEN, DEFAULT_AUDIO_TOKEN
 
-local_rank = None
+def is_rank_zero():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+    rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", None))
+    if rank is not None:
+        try:
+            return int(rank) == 0
+        except ValueError:
+            pass
+    return True
 
-def rank0_print(*args):
-    if local_rank == 0:
-        print(*args)
+def rank0_print(*args, **kwargs):
+    if is_rank_zero():
+        kwargs.setdefault("flush", True)
+        print(*args, **kwargs)
 
 def read_jsonl(path):
     with open(path, "r") as f:

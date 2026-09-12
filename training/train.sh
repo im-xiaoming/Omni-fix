@@ -44,6 +44,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
 
 # --- default paths if not set by environment ---
 WAVE_PATH="${WAVE_PATH:-$(cd -- "${REPO_ROOT}/../../WAVE_HOME/WAVE-7B" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")}"
@@ -159,10 +160,11 @@ if command -v deepspeed &>/dev/null; then
     --save_steps 1000 \
     --save_total_limit 5 \
     --report_to none \
+    --disable_tqdm False \
     "$@"
 else
   echo "DeepSpeed không được tìm thấy, chạy trực tiếp bằng Python..."
-  python "${REPO_ROOT}/qwenvl/train/train_qwen.py" \
+  python -u "${REPO_ROOT}/qwenvl/train/train_qwen.py" \
     --model_name_or_path "${WAVE_PATH}" \
     --model_base         "${WAVE_PATH}" \
     --dataset_use        "${DATA_PATH}" \
@@ -200,6 +202,7 @@ else
     --save_steps 1000 \
     --save_total_limit 5 \
     --report_to none \
+    --disable_tqdm False \
     "$@"
 fi
 exit $?
