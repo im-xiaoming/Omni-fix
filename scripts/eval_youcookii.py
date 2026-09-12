@@ -176,28 +176,25 @@ def main():
             batch_ids = batch.get("id", [])
             ids_list.extend(batch_ids)
 
-            # Move inputs to device
-            input_ids = batch["input_ids"].to(args.device)
-            attention_mask = batch["attention_mask"].to(args.device)
-
-            pixel_values_videos = [v.to(args.device, dtype=torch_dtype) for v in batch["pixel_values_videos"]] if batch.get("pixel_values_videos") else None
-            video_grid_thw = [t.to(args.device) for t in batch["video_grid_thw"]] if batch.get("video_grid_thw") else None
-            video_second_per_grid = batch.get("video_second_per_grid")
-
-            input_features = [a.to(args.device, dtype=torch_dtype) for a in batch["input_features"]] if batch.get("input_features") else None
-            feature_attention_mask = [m.to(args.device) for m in batch["feature_attention_mask"]] if batch.get("feature_attention_mask") else None
-            input_raw_wav = batch.get("input_raw_wav")
+            # Move inputs to device cleanly without boolean tensor ambiguity
+            clean_inputs = {}
+            for k, v in batch.items():
+                if v is None:
+                    continue
+                if isinstance(v, torch.Tensor):
+                    if k in ("pixel_values", "pixel_values_videos", "input_features") and v.dtype == torch.float32:
+                        clean_inputs[k] = v.to(args.device, dtype=torch_dtype)
+                    else:
+                        clean_inputs[k] = v.to(args.device)
+                elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
+                    clean_inputs[k] = [t.to(args.device) for t in v]
+                else:
+                    clean_inputs[k] = v
 
             # Forward pass to get embeddings
             outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values_videos=pixel_values_videos,
-                video_grid_thw=video_grid_thw,
-                video_second_per_grid=video_second_per_grid,
-                input_features=input_features,
-                feature_attention_mask=feature_attention_mask,
-                input_raw_wav=input_raw_wav,
+                **clean_inputs,
+                output_hidden_states=True,
                 pred_embeds=True,
                 return_dict=True,
             )
