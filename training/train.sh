@@ -86,6 +86,7 @@ LORA_ALPHA="${LORA_ALPHA:-32}"
 LORA_INIT_ONLY="${LORA_INIT_ONLY:-True}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 USE_TUPLE_INFONCE="${USE_TUPLE_INFONCE:-True}"
+LORA_ONLY="${LORA_ONLY:-False}"
 
 echo "============================================================"
 echo "  OmniRetriever-7B Training Launcher (Bash)"
@@ -152,6 +153,7 @@ if command -v deepspeed &>/dev/null; then
     --use_tuple_infonce  "${USE_TUPLE_INFONCE}" \
     --lora_ckpt "${LORA_CKPT}" \
     --lora_init_only "${LORA_INIT_ONLY}" \
+    --lora_only      "${LORA_ONLY}" \
     --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
     --save_strategy steps \
     --save_steps 1000 \
@@ -192,6 +194,7 @@ else
     --use_tuple_infonce  "${USE_TUPLE_INFONCE}" \
     --lora_ckpt "${LORA_CKPT}" \
     --lora_init_only "${LORA_INIT_ONLY}" \
+    --lora_only      "${LORA_ONLY}" \
     --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
     --save_strategy steps \
     --save_steps 1000 \

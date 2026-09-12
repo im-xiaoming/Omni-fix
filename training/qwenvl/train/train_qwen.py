@@ -275,15 +275,75 @@ def train(attn_implementation="flash_attention_2"):
         for k, v in model.named_parameters():
             if "lora" in k:
                 v.requires_grad_(True)
-        
-        cnt, total = 0, 0
+
+        # ── LoRA-only mode ─────────────────────────────────────────────────
+        # Re-freeze everything except lora_A / lora_B so that classify_linear,
+        # beats_ln and beats_proj (restored from the pretrained adapter above)
+        # are kept frozen and only the LoRA delta weights are updated.
+        if model_args.lora_only:
+            if model_args.lora_ckpt == "No":
+                raise ValueError(
+                    "lora_only=True requires lora_ckpt to point at the pretrained "
+                    "OmniRetriever adapter so that classify_linear, beats_ln and "
+                    "beats_proj can be restored before being frozen."
+                )
+            if not model_args.use_lora:
+                raise ValueError("lora_only=True requires use_lora=True.")
+
+            # Pass 1: freeze everything
+            for p in model.parameters():
+                p.requires_grad_(False)
+
+            # Pass 2: unfreeze only lora_A and lora_B
+            for name, p in model.named_parameters():
+                if "lora_A" in name or "lora_B" in name:
+                    p.requires_grad_(True)
+
+            # ── Sanity assertions ──────────────────────────────────────────
+            # Any trainable param whose name does not contain "lora" is a bug.
+            unexpected_trainable = [
+                name for name, p in model.named_parameters()
+                if p.requires_grad and "lora" not in name
+            ]
+            assert len(unexpected_trainable) == 0, (
+                f"[lora_only] Unexpected trainable parameters found (should be empty): "
+                f"{unexpected_trainable}"
+            )
+
+            # classify_linear, beats_ln, beats_proj must be strictly frozen.
+            for head_name in ("classify_linear", "beats_ln", "beats_proj"):
+                leaky = [
+                    name for name, p in model.named_parameters()
+                    if head_name in name and p.requires_grad
+                ]
+                assert len(leaky) == 0, (
+                    f"[lora_only] {head_name} has requires_grad=True but must be "
+                    f"frozen in lora_only mode. Offending params: {leaky}"
+                )
+
+            rank0_print("[lora_only] Assertions passed: only lora_A/lora_B are trainable.")
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Trainable parameter report (rank-0 only) ───────────────────────
         if dist.get_rank() == 0:
-            for k, v in model.named_parameters():
-                if v.requires_grad:
-                    print(k, v.shape)
-                    cnt += 1
-                total += 1
-            print(cnt, total)
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            trainable_pct = 100.0 * trainable_params / total_params if total_params > 0 else 0.0
+            print("\n" + "=" * 70)
+            print("  TRAINABLE PARAMETER REPORT")
+            print("=" * 70)
+            print(f"  Total parameters    : {total_params:,}")
+            print(f"  Trainable params    : {trainable_params:,}")
+            print(f"  Trainable %         : {trainable_pct:.4f}%")
+            print("-" * 70)
+            print("  Trainable parameter list:")
+            trainable_cnt = 0
+            for name, p in model.named_parameters():
+                if p.requires_grad:
+                    print(f"    {name}  {list(p.shape)}")
+                    trainable_cnt += 1
+            print(f"  (Total trainable tensors: {trainable_cnt})")
+            print("=" * 70 + "\n")
         
         class LossProgressCallback(TrainerCallback):
             def on_log(self, args, state, control, logs=None, **kwargs):

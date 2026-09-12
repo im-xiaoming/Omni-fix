@@ -37,6 +37,7 @@ class ModelArguments:
     lora_bias: str = field(default="none")
     lora_ckpt: str = field(default="No")
     lora_init_only: bool = field(default=False, metadata={"help": "If True, load LoRA + modules_to_save weights from `lora_ckpt` as initialization but DO NOT resume the trainer state (fresh global_step=0, fresh optimizer, fresh cosine LR cycle)."})
+    lora_only: bool = field(default=False, metadata={"help": "If True, after loading the pretrained adapter, freeze EVERYTHING except lora_A and lora_B. classify_linear, beats_ln and beats_proj will be restored from the adapter checkpoint but kept frozen. Requires lora_ckpt != 'No' and use_lora=True."})
     train_classify: bool = field(default=False)
     classify_dim: int = field(default=24)
     classify_type: str = field(default="last_layer")
