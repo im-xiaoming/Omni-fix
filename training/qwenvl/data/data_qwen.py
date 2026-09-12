@@ -795,7 +795,7 @@ class LazySupervisedDataset(Dataset):
             
             if "pos_image" in sources[0]:
                 if "image" in sources[0]["pos_image"]:
-                    pos_image_file = sources[0]["pos_image"]["image"]
+                    pos_image_file = resolve_media_path(sources[0]["pos_image"]["image"], "IMAGE_ROOT")
                     pos_image, pos_grid_thw = self.process_image_unified(pos_image_file)
                     pos_image = [pos_image]
                     pos_grid_thw = [pos_grid_thw.unsqueeze(0)]
@@ -803,7 +803,7 @@ class LazySupervisedDataset(Dataset):
                     pos_image, pos_grid_thw = None, None
 
                 if "video" in sources[0]["pos_image"]:
-                    pos_video_file = sources[0]["pos_image"]["video"]
+                    pos_video_file = resolve_media_path(sources[0]["pos_image"]["video"], "VIDEO_ROOT")
                     pos_video, pos_video_grid_thw, pos_second_per_grid_ts = self.process_video(pos_video_file)
                     pos_video = [pos_video]
                     pos_video_grid_thw = [pos_video_grid_thw]
@@ -867,6 +867,7 @@ class LazySupervisedDataset(Dataset):
                     if isinstance(video_file_for_aug, list):
                         video_file_for_aug = video_file_for_aug[0] if len(video_file_for_aug) == 1 else video_file_for_aug
                     if isinstance(video_file_for_aug, str):
+                        video_file_for_aug = resolve_media_path(video_file_for_aug, "VIDEO_ROOT")
                         aug_vid, aug_vgt, aug_spg = self.video_decord_augmented(video_file_for_aug, timestamps=timestamps_aug)
                         data_dict["aug_pixel_values_videos"] = aug_vid
                         data_dict["aug_video_grid_thw"] = aug_vgt
