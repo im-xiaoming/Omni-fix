@@ -21,6 +21,11 @@ from typing import Dict, List, Optional, Sequence
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 # from contextlib import contextmanager, nullcontext
 
+# Transformers imports DeepSpeed from modeling_utils. Importing it first
+# prevents DeepSpeed's OPT integration from re-entering that module while it
+# is still being initialized.
+import deepspeed
+
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
     MODEL_MAPPING_NAMES,
