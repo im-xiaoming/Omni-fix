@@ -437,6 +437,15 @@ class QwenVLTrainer(Trainer):
                     },
                 ]
 
+            # DeepSpeed may drop empty parameter groups while retaining the
+            # scheduler entries created for them. That leaves the scheduler
+            # with more learning rates than optimizer groups at the first step.
+            optimizer_grouped_parameters = [
+                group for group in optimizer_grouped_parameters if group["params"]
+            ]
+            if not optimizer_grouped_parameters:
+                raise ValueError("No trainable parameters were found for the optimizer.")
+
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
                 self.args
             )
