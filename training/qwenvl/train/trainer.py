@@ -33,6 +33,10 @@ try:
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
 except ImportError:
     flash_attn_varlen_func = None
+# Import DeepSpeed before Transformers' Trainer. Newer Transformers imports
+# DeepSpeed from modeling_utils, while DeepSpeed's hybrid engine accesses the
+# OPT model module; preloading it prevents that circular lazy-import path.
+import deepspeed
 from transformers import Trainer
 from transformers.cache_utils import Cache
 
