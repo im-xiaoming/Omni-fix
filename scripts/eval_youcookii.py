@@ -132,7 +132,7 @@ def main():
         torch_dtype=torch_dtype,
     )
     if os.path.exists(args.beats_path):
-        beats_ckpt = torch.load(args.beats_path, map_location="cpu")
+        beats_ckpt = torch.load(args.beats_path, map_location="cpu", weights_only=False)
         model.beats.load_state_dict(beats_ckpt["model"])
 
     if args.adapter and args.adapter != "No":

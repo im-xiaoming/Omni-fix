@@ -2423,7 +2423,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCo
         self.beats_only = False
         if hasattr(config.audio_config, "beats_path") and config.audio_config.beats_path != "No":
             print("Init BEATs Model")
-            beats_ckpt = torch.load(config.audio_config.beats_path, map_location='cpu')
+            beats_ckpt = torch.load(config.audio_config.beats_path, map_location='cpu', weights_only=False)
             beats_cfg = BEATsConfig(beats_ckpt['cfg'])
             self.use_beats = True
             self.beats_only = config.audio_config.beats_only
@@ -5257,7 +5257,7 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
         self.has_talker = True
 
     def load_speakers(self, path):
-        for key, value in torch.load(path).items():
+        for key, value in torch.load(path, weights_only=False).items():
             self.speaker_map[key] = value
         logger.info("Speaker {} loaded".format(list(self.speaker_map.keys())))
 

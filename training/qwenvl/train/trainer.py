@@ -71,7 +71,12 @@ from transformers.utils import (
     is_peft_available,
     is_accelerate_available,
     is_torch_xla_available,
-    is_apex_available
+    is_apex_available,
+    is_torch_xpu_available,
+    is_torch_mlu_available,
+    is_torch_musa_available,
+    is_torch_npu_available,
+    is_torch_mps_available,
 )
 import time
 
@@ -176,7 +181,7 @@ class QwenVLTrainer(Trainer):
         output_dir = os.path.join(run_dir, checkpoint_folder)
         self.save_model(output_dir, _internal_call=True)
 
-        if self.args.save_strategy in [SaveStrategy.STEPS, SaveStrategy.EPOCH] and self.state.best_global_step:
+        if self.args.save_strategy in [SaveStrategy.STEPS, SaveStrategy.EPOCH] and getattr(self.state, "best_global_step", None):
             best_checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.best_global_step}"
             best_checkpoint_dir = os.path.join(run_dir, best_checkpoint_folder)
 
@@ -635,7 +640,7 @@ class QwenVLTrainer(Trainer):
                 epoch_dataloader.set_epoch(epoch)
 
             # Reset the past mems state at the beginning of each epoch if necessary.
-            if args.past_index >= 0:
+            if getattr(args, "past_index", -1) >= 0:
                 self._past = None
 
             steps_in_epoch = (
@@ -852,7 +857,7 @@ class QwenVLTrainer(Trainer):
             if self.control.should_training_stop:
                 break
 
-        if args.past_index and hasattr(self, "_past"):
+        if getattr(args, "past_index", -1) >= 0 and hasattr(self, "_past"):
             # Clean the state at the end of training
             delattr(self, "_past")
 
@@ -930,7 +935,7 @@ class QwenVLTrainer(Trainer):
         
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
-        if self.args.past_index >= 0:
+        if getattr(self.args, "past_index", -1) >= 0:
             self._past = outputs[self.args.past_index]
 
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
@@ -1095,7 +1100,7 @@ class QwenVLTrainer(Trainer):
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
 
-            self.log(logs, start_time)
+            self.log(logs)
 
         metrics = None
         if self.control.should_evaluate:

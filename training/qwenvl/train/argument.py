@@ -88,4 +88,5 @@ class TrainingArguments(transformers.TrainingArguments):
     temperature: float = field(default=0.01)
     use_type_sampler: bool = field(default=False)
     warmup_ratio: float = field(default=0.03)
+    past_index: int = field(default=-1)
 

@@ -221,7 +221,7 @@ def train(attn_implementation="flash_attention_2"):
         model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(model_args.model_name_or_path, config=model_config, cache_dir=training_args.cache_dir, torch_dtype=(torch.bfloat16 if training_args.bf16 else None), attn_implementation=attn_implementation)
 
         if model_args.use_beats:
-            beats_ckpt = torch.load(model_config.audio_config.beats_path, map_location='cpu')
+            beats_ckpt = torch.load(model_config.audio_config.beats_path, map_location='cpu', weights_only=False)
             model.beats.load_state_dict(beats_ckpt['model'])
 
         model.requires_grad_(False)
@@ -361,7 +361,7 @@ def train(attn_implementation="flash_attention_2"):
         model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(model_args.model_name_or_path, config=model_config, cache_dir=training_args.cache_dir, torch_dtype=(torch.bfloat16 if training_args.bf16 else None), attn_implementation=attn_implementation)
 
         if model_args.use_beats:
-            beats_ckpt = torch.load(model_config.audio_config.beats_path, map_location='cpu')
+            beats_ckpt = torch.load(model_config.audio_config.beats_path, map_location='cpu', weights_only=False)
             model.beats.load_state_dict(beats_ckpt['model'])
 
         if model_args.lora_ckpt != "No":
@@ -382,7 +382,6 @@ def train(attn_implementation="flash_attention_2"):
             shuffle=False,
             num_workers=training_args.dataloader_num_workers,
             collate_fn=collate_fn,
-            in_order=True,
         )
         all_time = 0.0
         cnt = 0
