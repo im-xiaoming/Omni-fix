@@ -17,6 +17,13 @@ Cách dùng:
     python scripts/retrieval_demo.py --interactive
 """
 
+# Tránh lỗi circular import giữa deepspeed và transformers.modeling_utils
+try:
+    import deepspeed
+except Exception:
+    pass
+import transformers
+
 import os
 import sys
 import json

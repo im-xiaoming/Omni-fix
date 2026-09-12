@@ -15,6 +15,13 @@
 # Adopted from https://github.com/QwenLM/Qwen2.5-Omni. The original license is located at 'third-party-license/qwen25omni.txt'.
 # Adopted from https://github.com/huggingface/transformers. The original license is located at 'third-party-license/transformers.txt'.
 
+# Tránh lỗi circular import giữa deepspeed và transformers.modeling_utils
+try:
+    import deepspeed
+except Exception:
+    pass
+import transformers
+
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union

@@ -17,6 +17,13 @@ Usage:
         --max-samples 500   # hoặc bỏ --max-samples để chạy toàn bộ 3110 mẫu
 """
 
+# Tránh lỗi circular import giữa deepspeed và transformers.modeling_utils
+try:
+    import deepspeed
+except Exception:
+    pass
+import transformers
+
 import os
 import sys
 import json
