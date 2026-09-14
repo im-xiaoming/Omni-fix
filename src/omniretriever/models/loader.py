@@ -53,6 +53,36 @@ class InferenceConfig:
         normalize: whether to L2-normalize the output embedding.
         precision: numerical precision (one of ``"float32"``, ``"bfloat16"``,
             ``"float16"``).
+        pin_video_resolution: whether to hold frames at ``video_resolution``
+            instead of the pixel floor WAVE-7B ships, which rescales 224 px up
+            to 336 px (576 visual tokens rather than 256). Off by default: the
+            floor is the released configuration, and pinning cost ``v2t`` 0.087
+            R@1 on a 300-record run. See
+            ``omniretriever.inference.encode._video_kwargs``.
+        append_turn_end: whether to close each prompt with the tokeniser's
+            ``<|im_end|>``, as the training pipeline does. Added downstream; the
+            fusion head pools a fixed final position, so without it the
+            embedding is read out of a different token for every modality. Not
+            applied on the ``av`` path, which cannot take a trailing token. See
+            ``omniretriever.inference.encode._turn_end``.
+        media_instruction: filler placed next to a media placeholder when the
+            combination carries no caption. Added downstream to match the
+            training recipe; set it to ``""`` to reproduce the released
+            behaviour of sending a bare placeholder.
+        instruction_paths: which encoders actually use that filler. It does not
+            help everywhere. Measured on 300 records, adding it to the audio
+            path lifted ``t2a`` from 0.110 to 0.197 and ``a2t`` from 0.103 to
+            0.187, while adding it to the video path cost ``v2t`` 0.087 and
+            ``v2at`` 0.077 for a 0.013 gain on ``t2v``. So ``video`` is out by
+            default and ``audio`` is in. ``av`` carries both streams, so neither
+            contrast covers it; it keeps the filler until someone measures it.
+        duplicate_audio_tokens: whether to give each audio frame the second
+            token slot the interleaved BEATs branch fills. Added downstream and
+            defaulted **off**: Table S2 of the paper puts the joint AV forward
+            at about 470 tokens, which the undoubled layout matches (465) and
+            the doubled one does not (665). A 300-record A/B moved AVG-all by
+            +0.004 R@1, i.e. nothing. See
+            ``omniretriever.inference.encode._apply_beats_audio_slots``.
     """
 
     video_max_frames: int = DEFAULT_VIDEO_FRAMES
@@ -62,6 +92,11 @@ class InferenceConfig:
     embed_dim: int = DEFAULT_EMBED_DIM
     normalize: bool = True
     precision: str = "bfloat16"
+    append_turn_end: bool = True
+    media_instruction: str = "Please describe the video."
+    instruction_paths: tuple[str, ...] = ("audio", "av")
+    duplicate_audio_tokens: bool = False
+    pin_video_resolution: bool = False
 
     extra: dict = field(default_factory=dict)
 
@@ -98,6 +133,10 @@ class OmniRetriever:
         device: str = "cuda",
         dtype: str = "bfloat16",
         config: InferenceConfig | None = None,
+        duplicate_audio_tokens: bool = False,
+        pin_video_resolution: bool = False,
+        instruction_paths: Sequence[str] = ("audio", "av"),
+        append_turn_end: bool = True,
     ) -> "OmniRetriever":
         """Load WAVE-7B and apply the OmniRetriever LoRA adapter.
 
@@ -106,7 +145,14 @@ class OmniRetriever:
             adapter: path of the released LoRA adapter directory.
             device: PyTorch device string.
             dtype: precision (one of ``float32`` / ``bfloat16`` / ``float16``).
-            config: optional :class:`InferenceConfig` override.
+            config: optional :class:`InferenceConfig` override. When given, it
+                is used as-is and the two flags below are ignored.
+            duplicate_audio_tokens: see the field of the same name on
+                :class:`InferenceConfig`.
+            pin_video_resolution: see the field of the same name on
+                :class:`InferenceConfig`.
+            instruction_paths: see the field of the same name on
+                :class:`InferenceConfig`.
 
         Returns:
             An :class:`OmniRetriever` instance ready for ``encode_*`` calls.
@@ -119,7 +165,13 @@ class OmniRetriever:
         from omniretriever.models.wave import load_wave_backbone
 
         torch_dtype = _resolve_dtype(dtype)
-        config = config or InferenceConfig(precision=dtype)
+        config = config or InferenceConfig(
+            precision=dtype,
+            duplicate_audio_tokens=duplicate_audio_tokens,
+            pin_video_resolution=pin_video_resolution,
+            instruction_paths=tuple(instruction_paths),
+            append_turn_end=append_turn_end,
+        )
 
         logger.info("Loading WAVE-7B backbone from %s", base_model)
         backbone = load_wave_backbone(base_model, torch_dtype=torch_dtype)
@@ -151,11 +203,17 @@ class OmniRetriever:
         return encode_text(self._backbone, self._processor, text, self._config)
 
     @torch.inference_mode()
-    def encode_video(self, video_path: str | Sequence[str]) -> torch.Tensor:
-        """Encode one or more video files (video-only path, audio ignored)."""
+    def encode_video(self, video_path: str | Sequence[str], timestamps=None) -> torch.Tensor:
+        """Encode one or more video files (video-only path, audio ignored).
+
+        ``timestamps`` restricts sampling to a ``(start, end)`` window per path,
+        for manifests whose records are segments of a longer file.
+        """
         from omniretriever.inference.encode import encode_video
 
-        return encode_video(self._backbone, self._processor, video_path, self._config)
+        return encode_video(
+            self._backbone, self._processor, video_path, self._config, timestamps
+        )
 
     @torch.inference_mode()
     def encode_audio(self, audio_path: str | Sequence[str]) -> torch.Tensor:
@@ -165,15 +223,46 @@ class OmniRetriever:
         return encode_audio(self._backbone, self._processor, audio_path, self._config)
 
     @torch.inference_mode()
-    def encode_av(self, clip_path: str | Sequence[str]) -> torch.Tensor:
+    def encode_av(self, clip_path: str | Sequence[str], timestamps=None) -> torch.Tensor:
         """Encode one or more video files using both audio and video streams.
 
         ``clip_path`` should point to a container (MP4/MOV/WEBM) whose audio
-        track is decoded jointly with the visual frames.
+        track is decoded jointly with the visual frames. ``timestamps`` windows
+        both streams together.
         """
         from omniretriever.inference.encode import encode_av
 
-        return encode_av(self._backbone, self._processor, clip_path, self._config)
+        return encode_av(
+            self._backbone, self._processor, clip_path, self._config, timestamps
+        )
+
+    # ------------------------------------------------------------------ #
+    # Dual-modal encoders (added downstream, not in the original release) #
+    # ------------------------------------------------------------------ #
+
+    @torch.inference_mode()
+    def encode_tv(self, video_path, text, timestamps=None) -> torch.Tensor:
+        """Encode video and text jointly (the ``tv`` side of the benchmark).
+
+        Added for this checkout; see the note above ``encode_tv`` in
+        ``omniretriever.inference.encode`` for how the prompt is built and how
+        it relates to the training-time recipe.
+        """
+        from omniretriever.inference.encode import encode_tv
+
+        return encode_tv(
+            self._backbone, self._processor, video_path, text, self._config, timestamps
+        )
+
+    @torch.inference_mode()
+    def encode_at(self, audio_path, text) -> torch.Tensor:
+        """Encode audio and text jointly (the ``at`` side of the benchmark).
+
+        Added for this checkout, same caveats as :meth:`encode_tv`.
+        """
+        from omniretriever.inference.encode import encode_at
+
+        return encode_at(self._backbone, self._processor, audio_path, text, self._config)
 
     # ------------------------------------------------------------------ #
     # Accessors                                                          #

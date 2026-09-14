@@ -4,8 +4,9 @@ torchaudio>=2.4.0
 torchvision>=0.19.0
 
 # HuggingFace ecosystem
-# Qwen2.5-Omni's custom processor is coupled to this video processor API.
-transformers==4.51.3
+# Inference only; the benchmark runs on 4.57.3. training/requirements.txt keeps
+# its own pin, which the fine-tuning stack still needs.
+transformers>=4.45.0
 peft>=0.13.0
 accelerate>=0.34.0
 safetensors>=0.4.5

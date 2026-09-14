@@ -1,17 +1,44 @@
 """Lightweight media loaders shared between training and inference.
 
 The loaders intentionally do not import heavy frameworks at module-import time;
-all heavy dependencies (``decord``, ``librosa``) are imported lazily inside the
+all heavy dependencies (``av``, ``librosa``) are imported lazily inside the
 function bodies so users who only need text encoding can avoid the cost.
+
+Video decoding moved from ``decord`` to PyAV downstream of the release; see the
+note on :func:`load_video_frames`. ``decord`` is no longer imported anywhere.
 """
 
 from __future__ import annotations
 
+import functools
 import os
+import warnings
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+
+# librosa cannot read the AAC track inside an MP4 through libsndfile, so it falls
+# back to audioread and warns about it -- twice per clip, several lines each. The
+# fallback is the correct path and its output is what every existing embedding was
+# built on, so this silences the noise and changes nothing else. Worth doing: on
+# Colab every one of those lines is streamed to the browser, and a full run makes
+# tens of thousands of them.
+warnings.filterwarnings("ignore", message="PySoundFile failed.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*__audioread_load.*", category=FutureWarning)
+
+# ADDED downstream. A single extraction pass touches the same clip three times,
+# once for ``video``, once for ``av`` and once for ``tv``, and decoding is the
+# slowest step in the whole pipeline. Memoising the loaders turns that into one
+# decode per clip as long as the three calls land close together, which is what
+# the record-major batch order in ``omniretriever.cli`` arranges.
+#
+# The entries are small -- video frames come back already resized, so an 8-frame
+# 224 px clip is 1.2 MB, and an 8 s mono waveform at 16 kHz is 512 KB -- so a few
+# dozen of them cost tens of megabytes. Callers must not mutate what they get
+# back: every hit hands out the same array.
+VIDEO_CACHE_SIZE = 32
+AUDIO_CACHE_SIZE = 32
 
 
 # --------------------------------------------------------------------------- #
@@ -19,12 +46,14 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 
 
+@functools.lru_cache(maxsize=VIDEO_CACHE_SIZE)
 def load_video_frames(
     path: str | os.PathLike,
     *,
     num_frames: int = 8,
     resolution: int = 224,
     sampling: str = "uniform",
+    timestamps: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """Load ``num_frames`` frames from a video as a ``(N, H, W, 3)`` ``uint8`` array.
 
@@ -34,24 +63,59 @@ def load_video_frames(
         resolution: target square resolution for each frame.
         sampling: ``"uniform"`` (default, evenly spaced) or ``"random"`` for a
             random subset of ``num_frames`` frames.
+        timestamps: optional ``(start, end)`` in seconds. Sampling is then
+            confined to that window instead of the whole file, matching what
+            ``training/qwenvl/data/data_qwen.py`` does with the ``timestamps``
+            field of a manifest record. Must be a tuple: this function is
+            memoised, so the argument has to be hashable.
 
     Returns:
         A NumPy array of shape ``(num_frames, resolution, resolution, 3)``,
         ``dtype=uint8``, RGB.
-    """
-    import decord
-    from decord import VideoReader, cpu
 
-    decord.bridge.set_bridge("native")
+    Note:
+        CHANGED downstream. The released code decoded with ``decord``, which
+        hangs forever inside its native reader on a large share of this
+        benchmark's clips -- 561 of 3515 in a full sweep, concentrated in the
+        newest source ids. The hang happens while constructing ``VideoReader``,
+        in C, so no Python-side timeout can interrupt it. PyAV reads every one
+        of those files (562 of the 567 decord could not handle; the other five
+        decode to zero frames under either library and are genuinely broken),
+        and it is already a dependency because the audio loader falls back to
+        it.
+
+        The two libraries disagree on how many frames a clip holds, because
+        decord trusts the container index while this counts frames it actually
+        decoded. Uniform sampling spreads its indices over that total, so the
+        selected frames -- and every ``video``, ``av`` and ``tv`` embedding --
+        differ from a decord-based run. Do not mix embeddings across the two.
+
+        Frames are held at full resolution until the sample is picked, so peak
+        memory scales with clip length rather than ``num_frames``. The
+        benchmark's p99 clip is 16 s, which is comfortable; very long inputs
+        would not be -- pass ``timestamps`` for those, which bounds both the
+        decode and the memory by the window rather than the file.
+    """
+    import av
 
     path = str(path)
-    reader = VideoReader(path, ctx=cpu(0), num_threads=1)
-    total = len(reader)
+    with av.open(path) as container:
+        if not container.streams.video:
+            raise RuntimeError(f"{path!r} contains no video stream.")
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        if timestamps is None:
+            frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
+        else:
+            frames = _decode_window(container, stream, *timestamps)
+
+    total = len(frames)
     if total == 0:
-        raise RuntimeError(f"Video {path!r} has zero frames.")
+        window = "" if timestamps is None else f" within {timestamps[0]}-{timestamps[1]}s"
+        raise RuntimeError(f"Video {path!r} has zero frames{window}.")
 
     if sampling == "uniform":
-        idx = np.linspace(0, max(total - 1, 0), num=num_frames, dtype=int)
+        idx = np.linspace(0, total - 1, num=num_frames, dtype=int)
     elif sampling == "random":
         idx = np.sort(
             np.random.default_rng().choice(total, size=min(num_frames, total), replace=False)
@@ -59,8 +123,33 @@ def load_video_frames(
     else:
         raise ValueError(f"Unknown sampling strategy: {sampling!r}")
 
-    frames = reader.get_batch(idx).asnumpy()  # (N, H, W, 3) uint8
-    frames = _resize_frames(frames, resolution)
+    return _resize_frames(np.stack([frames[i] for i in idx]), resolution)
+
+
+def _decode_window(container, stream, start: float, end: float) -> list[np.ndarray]:
+    """Decode only the frames presented between ``start`` and ``end`` seconds.
+
+    Seeking lands on the keyframe at or before the target, never exactly on it,
+    so the frames before ``start`` still have to be dropped by timestamp. The
+    loop stops at the first frame past ``end`` rather than filtering to the end
+    of the file, which is what keeps a 13 s window out of a 10 min video cheap.
+    """
+    time_base = stream.time_base
+    if time_base is None:
+        raise RuntimeError("Stream has no time base; cannot honour timestamps.")
+
+    container.seek(max(int(start / time_base), 0), stream=stream)
+
+    frames = []
+    for frame in container.decode(stream):
+        if frame.pts is None:
+            continue
+        seconds = float(frame.pts * time_base)
+        if seconds < start:
+            continue
+        if seconds > end:
+            break
+        frames.append(frame.to_ndarray(format="rgb24"))
     return frames
 
 
@@ -86,12 +175,14 @@ def _resize_frames(frames: np.ndarray, resolution: int) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 
+@functools.lru_cache(maxsize=AUDIO_CACHE_SIZE)
 def load_audio_waveform(
     path: str | os.PathLike,
     *,
     duration_sec: int = 8,
     sample_rate: int = 16_000,
     pad_mode: str = "zero",
+    timestamps: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """Load a fixed-duration mono waveform from a video or audio container.
 
@@ -104,6 +195,10 @@ def load_audio_waveform(
         sample_rate: target sample rate (Hz).
         pad_mode: how to pad short clips. One of ``"zero"`` (silence) or
             ``"loop"`` (repeat the source until it fills the window).
+        timestamps: optional ``(start, end)`` in seconds, applied before the
+            crop/pad above. Needed when the source is a long container holding
+            many segments; pass ``None`` for a file that is already one segment.
+            Must be a tuple, since this function is memoised.
 
     Returns:
         A NumPy array of shape ``(duration_sec * sample_rate,)``, ``dtype=float32``.
@@ -112,6 +207,10 @@ def load_audio_waveform(
     target_len = int(duration_sec * sample_rate)
 
     waveform = np.asarray(_decode_waveform(path, sample_rate), dtype=np.float32)
+
+    if timestamps is not None:
+        start, end = timestamps
+        waveform = waveform[int(start * sample_rate):int(end * sample_rate)]
 
     if waveform.shape[0] >= target_len:
         # Centre crop.
