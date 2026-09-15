@@ -80,22 +80,37 @@ def encode_audio(backbone, processor, audio_path, config):
     )
 
 
-def encode_av(backbone, processor, clip_path, config, timestamps=None):
+def encode_av(backbone, processor, clip_path, config, timestamps=None, audio_path=None):
     """Encode multimodal clip(s) using both visual and audio streams.
 
-    ``timestamps`` windows *both* streams, keeping them aligned -- which is what
-    ``use_audio_in_video`` below assumes, since the processor interleaves the two
-    as though they cover the same span.
+    ``audio_path`` supplies the audio from separate files -- the layout the
+    benchmark ships (``clip.mp4`` beside ``clip.wav``) and the one training reads,
+    since ``training/qwenvl/data/data_qwen.py`` feeds ``use_audio_in_video`` from
+    the record's ``audio`` field rather than from the video container. Left at
+    ``None`` the audio is decoded from ``clip_path`` itself, which is the released
+    behaviour and the only option when a record carries no audio file.
+
+    ``timestamps`` windows the visual stream. It reaches the audio only in the
+    container case above: a separate audio file is taken to be the segment
+    already, exactly as :func:`encode_audio` treats it, so windowing it again
+    would cut a segment out of a segment. Either way the two streams end up
+    covering the same span, which is what ``use_audio_in_video`` below assumes
+    when it interleaves them.
     """
     paths = _as_list(clip_path)
     windows = _windows(timestamps, len(paths))
+    if audio_path is None:
+        audio_paths, audio_windows = paths, windows
+    else:
+        audio_paths, _ = _pair(audio_path, paths, "audio_path", "clip_path")
+        audio_windows = [None] * len(paths)
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution,
                                 timestamps=w) for p, w in zip(paths, windows)]
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
                                      sample_rate=config.audio_sample_rate,
-                                     timestamps=w) for p, w in zip(paths, windows)]
+                                     timestamps=w) for p, w in zip(audio_paths, audio_windows)]
     # With use_audio_in_video the processor rewrites the plain video placeholder
     # into interleaved video/audio chunks itself, so the prompt stays the
     # video-only one and must not carry a separate audio placeholder.

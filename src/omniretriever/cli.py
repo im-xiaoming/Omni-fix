@@ -32,19 +32,21 @@ def extract_main(argv: list[str] | None = None) -> int:
     extracted in the same run, so one pass over the canonical manifest yields
     ``text``, ``video``, ``audio``, ``av``, ``tv`` and ``at`` keys as the fields
     allow -- enough to score all twelve benchmark directions. The ``av``
-    embedding needs both ``video`` and ``audio`` to be present, and is read from
-    the video container, whose audio track is decoded alongside the frames;
-    ``tv`` and ``at`` pair a media stream with the caption.
+    embedding needs both ``video`` and ``audio``, taking its frames from the one
+    and its waveform from the other; ``tv`` and ``at`` pair a media stream with
+    the caption.
 
     Records are encoded in batches, and the partial result is checkpointed to
     ``OUTPUT.partial.npz`` so an interrupted run resumes where it stopped
     instead of starting over.
 
-    A training manifest is accepted as-is. Bare filenames are resolved against
-    ``$VIDEO_ROOT`` / ``$AUDIO_ROOT`` exactly as the trainer resolves them, and a
-    record's ``timestamps`` confine the ``video``, ``av`` and ``tv`` embeddings
-    to that segment -- without which every segment cut from one source video
-    would land on the same embedding.
+    Relative media paths are resolved against ``--media-root``, or against
+    ``$VIDEO_ROOT`` / ``$AUDIO_ROOT`` for a training manifest's bare basenames.
+    A record's ``timestamps``, where the manifest has them, confine the ``video``,
+    ``av`` and ``tv`` embeddings to that segment -- without which every segment
+    cut from one source video would land on the same embedding. The benchmark
+    ships its clips already cut, so its records carry no ``timestamps`` and every
+    file is read whole.
     """
     parser = _build_extract_parser()
     args = parser.parse_args(argv)
@@ -54,7 +56,8 @@ def extract_main(argv: list[str] | None = None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     partial_path = output_path.with_name(output_path.stem + ".partial.npz")
 
-    records = _resolve_media_paths(_load_manifest(args.manifest))
+    records = _resolve_media_paths(_load_manifest(args.manifest), args.media_root)
+    _warn_missing_media(records)
     windows_by_id = _windows_by_id(records)
     out: dict[str, np.ndarray] = {}
     if args.resume and partial_path.is_file():
@@ -79,17 +82,21 @@ def extract_main(argv: list[str] | None = None) -> int:
         instruction_paths=args.instruction_paths,
         append_turn_end=args.append_turn_end,
     )
-    # tv and at take two arguments, so their batches arrive as (media, caption)
-    # pairs and are transposed back into two parallel lists here.
+    # av, tv and at take two arguments, so their batches arrive as pairs --
+    # (video, audio) for av, (media, caption) for the other two -- and are
+    # transposed back into two parallel lists here.
     #
     # Only the three video-bearing encoders are given the record's window. The
     # audio field of a segmented manifest already points at a per-segment file,
-    # so windowing it again would cut a segment out of a segment.
+    # so windowing it again would cut a segment out of a segment; av windows its
+    # frames only, for the same reason.
     encoders = {
         "text": lambda values, windows: model.encode_text(values),
         "video": lambda values, windows: model.encode_video(values, windows),
         "audio": lambda values, windows: model.encode_audio(values),
-        "av": lambda values, windows: model.encode_av(values, windows),
+        "av": lambda values, windows: model.encode_av(
+            [video for video, _ in values], windows, [audio for _, audio in values]
+        ),
         "tv": lambda values, windows: model.encode_tv(*_unzip(values), windows),
         "at": lambda values, windows: model.encode_at(*_unzip(values)),
     }
@@ -150,25 +157,63 @@ DIRECTIONS = {
 _MEDIA_ROOTS = {"video": "VIDEO_ROOT", "audio": "AUDIO_ROOT"}
 
 
-def _resolve_media_paths(records: list[dict]) -> list[dict]:
-    """Prepend ``$VIDEO_ROOT`` / ``$AUDIO_ROOT`` to bare media filenames.
+def _resolve_media_paths(records: list[dict], media_root: str | None = None) -> list[dict]:
+    """Turn the manifest's relative media paths into paths that open.
 
-    The training manifests keep filenames as bare basenames on purpose and let
-    the loader prepend the roots (see ``scripts/convert_youcookii.py`` and
-    ``training/qwenvl/data/data_qwen.py::resolve_media_path``). Doing the same
-    here is what lets one manifest feed both training and this CLI.
+    Two manifest styles need this, and they disagree about what a relative path
+    is relative to:
 
-    A no-op when the variable is unset or the path is already absolute, so a
-    manifest carrying real paths -- the released benchmark's, for one -- is
-    untouched.
+    * The benchmark's, whose paths already carry their directory
+      (``benchmark/videos/clip.mp4``) and only need a base to hang off.
+      ``--media-root`` supplies that base for both fields at once.
+    * A training manifest's, which keeps bare basenames on purpose and lets the
+      loader prepend a per-modality root (see ``scripts/convert_youcookii.py``
+      and ``training/qwenvl/data/data_qwen.py::resolve_media_path``).
+      ``$VIDEO_ROOT`` / ``$AUDIO_ROOT`` supply those, which is what lets one
+      manifest feed both training and this CLI.
+
+    ``--media-root`` wins where both are set. Absolute paths are left alone, so a
+    manifest carrying real paths is untouched either way.
     """
     for record in records:
         for field, env_var in _MEDIA_ROOTS.items():
             value = record.get(field)
-            root = os.environ.get(env_var, "")
-            if root and isinstance(value, str) and value and not os.path.isabs(value):
+            if not isinstance(value, str) or not value or os.path.isabs(value):
+                continue
+            root = media_root or os.environ.get(env_var, "")
+            if root:
                 record[field] = os.path.join(root, value)
     return records
+
+
+def _warn_missing_media(records: list[dict]) -> None:
+    """Log the records whose media files are not on disk.
+
+    Encoding one of these raises, and nothing catches it, so the run dies wherever
+    the batch happens to land. A mistyped root is worth naming in the first second
+    instead: a full pass is six forward passes per record, and the resume file
+    only spares the batches that already finished.
+
+    A warning rather than a hard exit, because a manifest may legitimately cover
+    more of the corpus than is downloaded, and the modality filter can still
+    steer a run clear of the gap.
+    """
+    referenced = [
+        (record.get("id"), field, value)
+        for record in records
+        for field in _MEDIA_ROOTS
+        for value in (record.get(field),)
+        if isinstance(value, str) and value
+    ]
+    missing = [item for item in referenced if not os.path.isfile(item[2])]
+    if not missing:
+        return
+    shown = ", ".join(f"{record_id}:{field}={value}" for record_id, field, value in missing[:3])
+    logger.warning(
+        "%d of %d media files do not exist; encoding one will end the run (first: %s). "
+        "Check --media-root / $VIDEO_ROOT / $AUDIO_ROOT.",
+        len(missing), len(referenced), shown,
+    )
 
 
 def _windows_by_id(records: list[dict]) -> dict[str, tuple[float, float]]:
@@ -201,9 +246,10 @@ def _plan(
         "text": lambda r: r.get("text"),
         "video": lambda r: r.get("video"),
         "audio": lambda r: r.get("audio"),
-        # Both streams are decoded from the video container, so the audio field
-        # only gates the branch; see OmniRetriever.encode_av.
-        "av": lambda r: r.get("video") if r.get("audio") else None,
+        # (video, audio): the frames come from one file and the waveform from the
+        # other, which is how the benchmark ships them and how training reads
+        # them. See OmniRetriever.encode_av.
+        "av": lambda r: (r["video"], r["audio"]) if r.get("video") and r.get("audio") else None,
         # tv and at ride on encoders added downstream (see the note in
         # omniretriever.inference.encode); their inputs are (media, caption)
         # pairs rather than a single path.
@@ -267,13 +313,18 @@ def _media_keys(batch: tuple[str, list], windows: Mapping[str, tuple]) -> list[t
     modality, chunk = batch
     keys = []
     for record_id, value in chunk:
-        path = value[0] if isinstance(value, tuple) else value
         window = windows.get(record_id)
-        if modality in ("video", "av", "tv"):
-            keys.append(("video", path, window))
-        if modality in ("audio", "av", "at"):
-            # Only av windows its audio; see the encoders map in extract_main.
-            keys.append(("audio", path, window if modality == "av" else None))
+        # av carries (video, audio); tv and at carry (media, caption), so their
+        # one path is the first element either way.
+        if modality in ("video", "tv"):
+            keys.append(("video", value[0] if modality == "tv" else value, window))
+        elif modality in ("audio", "at"):
+            keys.append(("audio", value[0] if modality == "at" else value, None))
+        elif modality == "av":
+            video, audio = value
+            keys.append(("video", video, window))
+            # Not windowed, matching the encoders map in extract_main.
+            keys.append(("audio", audio, None))
     return keys
 
 
@@ -371,6 +422,18 @@ def _build_extract_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-model", required=True, help="Path to the WAVE-7B backbone.")
     parser.add_argument("--adapter", required=True, help="Path to the LoRA adapter directory.")
     parser.add_argument("--output", required=True, help="Output .npz file.")
+    parser.add_argument(
+        "--media-root",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Base directory for the manifest's relative media paths. Use it when the paths "
+            "already carry their own directory, as the benchmark's do "
+            "(benchmark/videos/clip.mp4): point it at the folder holding 'benchmark'. Takes "
+            "precedence over $VIDEO_ROOT / $AUDIO_ROOT, which suit a training manifest's bare "
+            "basenames instead. Absolute paths in the manifest are never rewritten."
+        ),
+    )
     parser.add_argument("--device", default="cuda", help="Torch device (default cuda).")
     parser.add_argument(
         "--dtype",

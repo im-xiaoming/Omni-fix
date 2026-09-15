@@ -287,7 +287,15 @@ class LazySupervisedDataset(Dataset):
                     if sr != 16000:
                         audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
                     if timestamps is not None:
-                        audio = audio[int(timestamps[0] * 16000): int(timestamps[1] * 16000)]
+                        start = int(timestamps[0] * 16000)
+                        # Only clip when the window actually lies inside the file.
+                        # YouCookII ships one .wav per event, so the file is already
+                        # the segment while its timestamps address the full video and
+                        # point past the end -- clipping by them empties the waveform,
+                        # and an empty waveform is dropped silently further down.
+                        # A manifest whose audio is the full track still gets clipped.
+                        if start < len(audio):
+                            audio = audio[start: int(timestamps[1] * 16000)]
                     audio_data = [audio]
             else:
                 sr = 16000
@@ -312,6 +320,13 @@ class LazySupervisedDataset(Dataset):
                     audio_lengths_seg += (input_lengths_seg - 2) // 2 + 1
                 
                 if audio_lengths_seg <= 0:
+                    # Returning None here drops the audio for this record without
+                    # raising, which also strips it of its TupleInfoNCE data and
+                    # zeroes obj1 for every batch it lands in. Say so.
+                    rank0_print(
+                        f"[audio] empty waveform: file={audio_file} timestamps={timestamps}"
+                        " -- record trains without audio."
+                    )
                     return None, None, None
 
                 feature_attention_mask_idx = torch.cat(feature_attention_mask_idx, dim=0)
@@ -941,6 +956,17 @@ class LazySupervisedDataset(Dataset):
                 _tuple_ok = False
 
             if not _tuple_ok:
+                # The collator drops a field for the whole batch when any one
+                # sample is missing it, so a rare gap here zeroes obj1 for a
+                # whole optimiser step. Name the first one rather than let the
+                # objective quietly read zero for a full run.
+                if not getattr(LazySupervisedDataset, "_tuple_gap_warned", False):
+                    LazySupervisedDataset._tuple_gap_warned = True
+                    rank0_print(
+                        f"[TupleInfoNCE] no tuple data for sample {i} "
+                        f"(video={video is not None}, audio={audio is not None}, "
+                        f"label={bool(label)}). obj1 is 0 for any batch holding it."
+                    )
                 data_dict["aug_pixel_values_videos"] = None
                 data_dict["aug_video_grid_thw"] = None
                 data_dict["aug_video_second_per_grid"] = None

@@ -160,8 +160,12 @@ model = OmniRetriever.from_pretrained(
 
 z_text  = model.encode_text("a dog barking in the rain")
 z_video = model.encode_video("benchmark/videos/0001.mp4")
-z_audio = model.encode_audio("benchmark/videos/0001.mp4")     # decodes audio track
-z_av    = model.encode_av("benchmark/videos/0001.mp4")        # both streams
+z_audio = model.encode_audio("benchmark/videos/0001.wav")
+# Frames from the mp4, audio from the wav beside it -- the layout the benchmark
+# ships and the one training reads. Drop the second argument to decode the audio
+# out of the mp4 instead.
+z_av    = model.encode_av("benchmark/videos/0001.mp4",
+                          audio_path="benchmark/videos/0001.wav")
 
 # All embeddings are L2-normalised; cosine similarity is just a dot product.
 print(float(z_text @ z_av.T))
