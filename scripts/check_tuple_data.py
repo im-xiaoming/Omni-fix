@@ -81,41 +81,66 @@ def main(argv=None) -> int:
     ap.add_argument("--grad-accum", type=int, default=4)
     ap.add_argument("--limit", type=int, default=0,
                     help="check only the first N records (0 = all)")
+    ap.add_argument("--workers", type=int, default=16,
+                    help="threads for the audio header reads (default 16). Reading "
+                         "thousands of files off a Google Drive FUSE mount is latency "
+                         "bound, so threads help a lot there.")
     args = ap.parse_args(argv)
+
+    print(f"manifest   : {args.manifest}", flush=True)
+    print(f"AUDIO_ROOT : {os.environ.get('AUDIO_ROOT', '(chua dat)')}", flush=True)
+    print(f"VIDEO_ROOT : {os.environ.get('VIDEO_ROOT', '(chua dat)')}", flush=True)
 
     lines = Path(args.manifest).read_text(encoding="utf-8").splitlines()
     records = [json.loads(l) for l in lines if l.strip()]
     if args.limit:
         records = records[:args.limit]
+    print(f"record     : {len(records):,}\n", flush=True)
 
     stats = {"no_video": 0, "no_audio_field": 0, "no_caption": 0,
              "audio_missing": 0, "audio_empty": 0, "ok": 0}
     examples: list[str] = []
 
+    # Cheap checks first, so the slow per-file reads only cover what needs them.
+    need_audio = []
     for rec in records:
         if not rec.get("video"):
             stats["no_video"] += 1
-            continue
-        if not caption_of(rec):
+        elif not caption_of(rec):
             stats["no_caption"] += 1
-            continue
-        if not rec.get("audio"):
+        elif not rec.get("audio"):
             stats["no_audio_field"] += 1
-            continue
-
-        path = resolve(rec["audio"], "AUDIO_ROOT")
-        n = audio_samples_after_clip(path, rec.get("timestamps"))
-        if n is None:
-            stats["audio_missing"] += 1
-            if len(examples) < 5:
-                examples.append(f"  khong doc duoc: {path}")
-        elif n < SAMPLE_RATE:
-            stats["audio_empty"] += 1
-            if len(examples) < 5:
-                examples.append(
-                    f"  rong/qua ngan ({n} mau): {rec.get('id')} ts={rec.get('timestamps')}")
         else:
-            stats["ok"] += 1
+            need_audio.append(rec)
+
+    print(f"doc header cua {len(need_audio):,} file audio "
+          f"({args.workers} luong)...", flush=True)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def check(rec):
+        path = resolve(rec["audio"], "AUDIO_ROOT")
+        return rec, path, audio_samples_after_clip(path, rec.get("timestamps"))
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        for rec, path, n in pool.map(check, need_audio):
+            done += 1
+            if done % 250 == 0 or done == len(need_audio):
+                print(f"  {done:,}/{len(need_audio):,}  ok={stats['ok']:,} "
+                      f"rong={stats['audio_empty']:,} thieu={stats['audio_missing']:,}",
+                      flush=True)
+            if n is None:
+                stats["audio_missing"] += 1
+                if len(examples) < 5:
+                    examples.append(f"  khong doc duoc: {path}")
+            elif n < SAMPLE_RATE:
+                stats["audio_empty"] += 1
+                if len(examples) < 5:
+                    examples.append(
+                        f"  rong/qua ngan ({n} mau): {rec.get('id')} ts={rec.get('timestamps')}")
+            else:
+                stats["ok"] += 1
 
     total = len(records)
     cov = stats["ok"] / total if total else 0.0
