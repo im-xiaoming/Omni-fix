@@ -16,6 +16,7 @@
 # Adopted from https://github.com/huggingface/transformers. The original license is located at 'third-party-license/transformers.txt'.
 
 import os
+import shutil
 import contextlib
 from typing import Dict, List, Optional, Sequence
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union

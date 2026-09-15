@@ -137,8 +137,12 @@ def main(argv=None) -> int:
             elif n < SAMPLE_RATE:
                 stats["audio_empty"] += 1
                 if len(examples) < 5:
+                    # n == 0 with the file present means the .wav itself is empty,
+                    # which is an extraction failure rather than a clipping one.
                     examples.append(
-                        f"  rong/qua ngan ({n} mau): {rec.get('id')} ts={rec.get('timestamps')}")
+                        f"  rong/qua ngan ({n} mau): id={rec.get('id')} "
+                        f"video={rec.get('video')} audio={rec.get('audio')} "
+                        f"ts={rec.get('timestamps')}")
             else:
                 stats["ok"] += 1
 
