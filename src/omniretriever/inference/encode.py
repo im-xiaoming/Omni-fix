@@ -59,12 +59,19 @@ def encode_video(backbone, processor, video_path, config, timestamps=None):
     return _forward_and_normalise(backbone, inputs, config)
 
 
-def encode_audio(backbone, processor, audio_path, config):
-    """Encode audio file(s) using the audio stream only."""
+def encode_audio(backbone, processor, audio_path, config, timestamps=None):
+    """Encode audio file(s) using the audio stream only.
+
+    ``timestamps`` cuts a ``(start, end)`` window per path out of the file -- the
+    event's audio when the path is the full video it was segmented from. Leave it
+    ``None`` for a file that is already one segment.
+    """
     paths = _as_list(audio_path)
+    windows = _windows(timestamps, len(paths))
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
-                                     sample_rate=config.audio_sample_rate) for p in paths]
+                                     sample_rate=config.audio_sample_rate,
+                                     timestamps=w) for p, w in zip(paths, windows)]
     suffix = _instruction(config, "audio") + _turn_end(processor, config)
     prompts = [_audio_prompt(processor, suffix)] * len(paths)
     inputs = processor(
@@ -80,7 +87,8 @@ def encode_audio(backbone, processor, audio_path, config):
     )
 
 
-def encode_av(backbone, processor, clip_path, config, timestamps=None, audio_path=None):
+def encode_av(backbone, processor, clip_path, config, timestamps=None, audio_path=None,
+              audio_timestamps=None):
     """Encode multimodal clip(s) using both visual and audio streams.
 
     ``audio_path`` supplies the audio from separate files -- the layout the
@@ -93,9 +101,11 @@ def encode_av(backbone, processor, clip_path, config, timestamps=None, audio_pat
     ``timestamps`` windows the visual stream. It reaches the audio only in the
     container case above: a separate audio file is taken to be the segment
     already, exactly as :func:`encode_audio` treats it, so windowing it again
-    would cut a segment out of a segment. Either way the two streams end up
-    covering the same span, which is what ``use_audio_in_video`` below assumes
-    when it interleaves them.
+    would cut a segment out of a segment -- unless ``audio_timestamps`` asks for
+    it, which is how a caller passes the full video as ``audio_path`` and has the
+    event's audio cut over the same window as its frames. Either way the two
+    streams end up covering the same span, which is what ``use_audio_in_video``
+    below assumes when it interleaves them.
     """
     paths = _as_list(clip_path)
     windows = _windows(timestamps, len(paths))
@@ -103,7 +113,7 @@ def encode_av(backbone, processor, clip_path, config, timestamps=None, audio_pat
         audio_paths, audio_windows = paths, windows
     else:
         audio_paths, _ = _pair(audio_path, paths, "audio_path", "clip_path")
-        audio_windows = [None] * len(paths)
+        audio_windows = _windows(audio_timestamps, len(paths))
     frames = [load_video_frames(p, num_frames=config.video_max_frames,
                                 resolution=config.video_resolution,
                                 timestamps=w) for p, w in zip(paths, windows)]
@@ -196,20 +206,24 @@ def encode_tv(backbone, processor, video_path, text, config, timestamps=None):
     return _forward_and_normalise(backbone, inputs, config)
 
 
-def encode_at(backbone, processor, audio_path, text, config):
+def encode_at(backbone, processor, audio_path, text, config, timestamps=None):
     """Encode audio and text jointly into the shared embedding space.
 
     Args:
         audio_path: one path, or a sequence of paths, to audio files.
         text: the matching caption, or a sequence of captions of equal length.
+        timestamps: optional per-path ``(start, end)`` window cut out of the
+            audio; see :func:`encode_audio`.
 
     Returns:
         Tensor of shape ``(N, D)``.
     """
     paths, texts = _pair(audio_path, text, "audio_path", "text")
+    windows = _windows(timestamps, len(paths))
     waveforms = [load_audio_waveform(p,
                                      duration_sec=config.audio_duration_sec,
-                                     sample_rate=config.audio_sample_rate) for p in paths]
+                                     sample_rate=config.audio_sample_rate,
+                                     timestamps=w) for p, w in zip(paths, windows)]
     end = _turn_end(processor, config)
     prompts = [_audio_prompt(processor, t + end) for t in texts]
     inputs = processor(

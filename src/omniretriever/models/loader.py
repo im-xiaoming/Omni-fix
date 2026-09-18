@@ -216,11 +216,17 @@ class OmniRetriever:
         )
 
     @torch.inference_mode()
-    def encode_audio(self, audio_path: str | Sequence[str]) -> torch.Tensor:
-        """Encode one or more audio files (audio-only path)."""
+    def encode_audio(self, audio_path: str | Sequence[str], timestamps=None) -> torch.Tensor:
+        """Encode one or more audio files (audio-only path).
+
+        ``timestamps`` cuts a ``(start, end)`` window per path, e.g. an event's
+        audio out of the full video it belongs to.
+        """
         from omniretriever.inference.encode import encode_audio
 
-        return encode_audio(self._backbone, self._processor, audio_path, self._config)
+        return encode_audio(
+            self._backbone, self._processor, audio_path, self._config, timestamps
+        )
 
     @torch.inference_mode()
     def encode_av(
@@ -228,20 +234,22 @@ class OmniRetriever:
         clip_path: str | Sequence[str],
         timestamps=None,
         audio_path=None,
+        audio_timestamps=None,
     ) -> torch.Tensor:
         """Encode one or more clips using both audio and video streams.
 
         ``clip_path`` supplies the frames. ``audio_path`` supplies the audio when
         it lives in its own file -- the benchmark's ``clip.wav`` beside
-        ``clip.mp4``, and what training reads; omit it to decode the audio track
-        out of ``clip_path`` instead. ``timestamps`` windows the frames, and the
-        audio too only in that container case; see
-        ``omniretriever.inference.encode.encode_av``.
+        ``clip.mp4``; omit it to decode the audio track out of ``clip_path``
+        instead. ``timestamps`` windows the frames, and the audio too in that
+        container case; ``audio_timestamps`` windows a separate ``audio_path``.
+        See ``omniretriever.inference.encode.encode_av``.
         """
         from omniretriever.inference.encode import encode_av
 
         return encode_av(
-            self._backbone, self._processor, clip_path, self._config, timestamps, audio_path
+            self._backbone, self._processor, clip_path, self._config, timestamps, audio_path,
+            audio_timestamps,
         )
 
     # ------------------------------------------------------------------ #
@@ -263,14 +271,16 @@ class OmniRetriever:
         )
 
     @torch.inference_mode()
-    def encode_at(self, audio_path, text) -> torch.Tensor:
+    def encode_at(self, audio_path, text, timestamps=None) -> torch.Tensor:
         """Encode audio and text jointly (the ``at`` side of the benchmark).
 
         Added for this checkout, same caveats as :meth:`encode_tv`.
         """
         from omniretriever.inference.encode import encode_at
 
-        return encode_at(self._backbone, self._processor, audio_path, text, self._config)
+        return encode_at(
+            self._backbone, self._processor, audio_path, text, self._config, timestamps
+        )
 
     # ------------------------------------------------------------------ #
     # Accessors                                                          #

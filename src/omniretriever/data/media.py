@@ -204,20 +204,29 @@ def load_audio_waveform(
         A NumPy array of shape ``(duration_sec * sample_rate,)``, ``dtype=float32``.
     """
     path = str(path)
-    target_len = int(duration_sec * sample_rate)
 
-    waveform = np.asarray(_decode_waveform(path, sample_rate), dtype=np.float32)
+    if timestamps is None:
+        waveform = np.asarray(_decode_waveform(path, sample_rate), dtype=np.float32)
+    else:
+        # Decode only the event's window instead of the whole track and slicing
+        # it afterwards: a YouCookII event is ~10 s out of a 5-10 min video.
+        waveform = load_audio_segment(path, *timestamps, sample_rate=sample_rate)
 
-    if timestamps is not None:
-        start, end = timestamps
-        waveform = waveform[int(start * sample_rate):int(end * sample_rate)]
+    return fit_waveform(waveform, int(duration_sec * sample_rate), pad_mode=pad_mode)
 
+
+def fit_waveform(waveform: np.ndarray, target_len: int, pad_mode: str = "zero") -> np.ndarray:
+    """Centre-crop or pad ``waveform`` to exactly ``target_len`` samples.
+
+    The single fixed-duration policy shared by inference and
+    ``training/qwenvl/data/data_qwen.py``, so an event's audio is cut the same
+    way on both sides.
+    """
+    waveform = np.asarray(waveform, dtype=np.float32)
     if waveform.shape[0] >= target_len:
-        # Centre crop.
         start = (waveform.shape[0] - target_len) // 2
         return waveform[start:start + target_len]
 
-    # Pad.
     if pad_mode == "zero":
         out = np.zeros(target_len, dtype=np.float32)
         out[: waveform.shape[0]] = waveform
@@ -227,6 +236,69 @@ def load_audio_waveform(
         return np.tile(waveform, n)[:target_len]
 
     raise ValueError(f"Unknown pad_mode: {pad_mode!r}")
+
+
+def load_audio_segment(
+    path: str | os.PathLike,
+    start: float | None = None,
+    end: float | None = None,
+    *,
+    sample_rate: int = 16_000,
+) -> np.ndarray:
+    """Cut the audio of one event out of a video (or audio) container.
+
+    Returns the mono float32 waveform between ``start`` and ``end`` seconds at
+    ``sample_rate``, uncropped and unpadded. ``None`` for either bound means the
+    start / end of the track. Channels are averaged, as ``librosa.load(mono=True)``
+    does.
+
+    Only the window is decoded: the container is seeked to ``start`` and decoding
+    stops at the first frame past ``end``, so the cost scales with the event
+    rather than the video.
+    """
+    import av
+
+    path = str(path)
+    chunks: list[np.ndarray] = []
+    first_time = None
+    with av.open(path) as container:
+        stream = next((s for s in container.streams if s.type == "audio"), None)
+        if stream is None:
+            raise RuntimeError(f"{path!r} contains no audio stream.")
+        time_base = stream.time_base
+        # Keep the channel layout and average afterwards (librosa's downmix)
+        # rather than let the resampler apply its own mono mix coefficients.
+        resampler = av.audio.resampler.AudioResampler(format="fltp", rate=sample_rate)
+
+        if start:
+            # Lands on the frame at or before ``start``; the overshoot is trimmed below.
+            container.seek(max(int(start / time_base), 0), stream=stream)
+
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                continue
+            frame_start = float(frame.pts * time_base)
+            if end is not None and frame_start >= end:
+                break
+            if start is not None and frame_start + frame.samples / frame.sample_rate <= start:
+                continue
+            if first_time is None:
+                first_time = frame_start
+            chunks.extend(r.to_ndarray().mean(axis=0) for r in resampler.resample(frame))
+        chunks.extend(r.to_ndarray().mean(axis=0) for r in resampler.resample(None))
+
+    if not chunks:
+        raise RuntimeError(f"Decoded no audio samples from {path!r} within {start}-{end}s.")
+    waveform = np.concatenate(chunks).astype(np.float32)
+
+    begin = start if start is not None else first_time
+    offset = max(int(round((begin - first_time) * sample_rate)), 0)
+    waveform = waveform[offset:]
+    if end is not None:
+        waveform = waveform[: max(int(round((end - begin) * sample_rate)), 0)]
+    if waveform.shape[0] == 0:
+        raise RuntimeError(f"Decoded no audio samples from {path!r} within {start}-{end}s.")
+    return waveform
 
 
 def _decode_waveform(path: str, sample_rate: int) -> np.ndarray:

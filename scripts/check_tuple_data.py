@@ -14,15 +14,19 @@ is what a full YouCookII run actually produced before the audio clipping fix.
 
 This checks the two things that fail silently at load time:
 
-* the audio file decodes to a non-empty waveform *after* ``timestamps`` clipping
-  (a per-segment .wav clipped by full-video timestamps comes back empty), and
-* the record has a video, an audio field and a caption at all.
+* the audio decodes to a non-empty waveform *after* ``timestamps`` clipping
+  (a per-segment .wav clipped by full-video timestamps comes back empty; an
+  event past the end of a truncated video does too), and
+* the record has a video and a caption at all.
+
+A record with an ``audio`` field reads that file. A video-only record -- the
+layout ``scripts/convert_youcookii.py`` writes -- has its audio cut out of the
+video over ``timestamps``, so the video's own audio stream is checked instead.
 
 Usage::
 
     VIDEO_ROOT=/content/data/YouCookII/videos \\
-    AUDIO_ROOT=/content/data/YouCookII/audio \\
-    python scripts/check_tuple_data.py /content/data/YouCookII/metadata/train_omni.jsonl
+    python scripts/check_tuple_data.py /content/data/YouCookII/metadata/train_omni_video.jsonl
 """
 
 from __future__ import annotations
@@ -73,6 +77,32 @@ def audio_samples_after_clip(path: str, timestamps) -> int | None:
     return max(0, min(end, total) - start)
 
 
+def video_audio_samples(path: str, timestamps) -> int | None:
+    """Samples the loader cuts out of a video's audio stream, or None when unreadable.
+
+    Read from the header: the stream's length bounds the window, as
+    ``omniretriever.data.media.load_audio_segment`` stops at the last packet.
+    """
+    import av
+
+    try:
+        with av.open(path) as container:
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is None:
+                return None
+            if stream.duration and stream.time_base:
+                total = float(stream.duration * stream.time_base)
+            else:
+                total = container.duration / 1e6
+    except Exception:
+        return None
+
+    if timestamps is None:
+        return int(total * SAMPLE_RATE)
+    start, end = float(timestamps[0]), float(timestamps[1])
+    return max(0, int((min(end, total) - start) * SAMPLE_RATE))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -108,8 +138,8 @@ def main(argv=None) -> int:
             stats["no_video"] += 1
         elif not caption_of(rec):
             stats["no_caption"] += 1
-        elif not rec.get("audio"):
-            stats["no_audio_field"] += 1
+        elif isinstance(rec.get("audio") or rec["video"], list):
+            stats["no_audio_field"] += 1  # multi-file records get silence in the loader
         else:
             need_audio.append(rec)
 
@@ -119,8 +149,11 @@ def main(argv=None) -> int:
     from concurrent.futures import ThreadPoolExecutor
 
     def check(rec):
-        path = resolve(rec["audio"], "AUDIO_ROOT")
-        return rec, path, audio_samples_after_clip(path, rec.get("timestamps"))
+        if rec.get("audio"):
+            path = resolve(rec["audio"], "AUDIO_ROOT")
+            return rec, path, audio_samples_after_clip(path, rec.get("timestamps"))
+        path = resolve(rec["video"], "VIDEO_ROOT")
+        return rec, path, video_audio_samples(path, rec.get("timestamps"))
 
     done = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
@@ -141,7 +174,7 @@ def main(argv=None) -> int:
                     # which is an extraction failure rather than a clipping one.
                     examples.append(
                         f"  rong/qua ngan ({n} mau): id={rec.get('id')} "
-                        f"video={rec.get('video')} audio={rec.get('audio')} "
+                        f"video={rec.get('video')} audio={rec.get('audio') or '(cat tu video)'} "
                         f"ts={rec.get('timestamps')}")
             else:
                 stats["ok"] += 1

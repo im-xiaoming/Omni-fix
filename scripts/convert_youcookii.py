@@ -2,164 +2,150 @@
 """
 convert_youcookii.py
 ====================
-Convert the raw YouCookII metadata JSONL files into the ``train_omni.jsonl``
-format expected by ``data_qwen.py`` / ``LazySupervisedDataset``.
+Build the video-only YouCookII manifests that training and inference both read.
 
-Key things this script does
----------------------------
-1. Reads the original ``youcookii_train.jsonl`` (and optionally ``youcookii_val.jsonl``).
-2. Each source record is **already one cooking event** (segment).  The ``timestamps``
-   field tells the loader which slice of the full video / audio to use -- no further
-   splitting is needed.
-3. Normalises the record to the exact schema expected by the trainer.
-4. Writes ``train_omni.jsonl`` (and ``val_omni.jsonl``) that can be passed directly
-   to ``DATA_PATH=...train_omni.jsonl bash training/train.sh``.
+The only media input is the full ``<video_id>.mp4``. Each record is one event
+(one recipe step) from the metadata: its ``timestamps`` are the ``[start, end]``
+segment, and at load time the event is cut out of the video on the fly --
+
+* the frames by ``training/qwenvl/data/data_qwen.py::video_decord`` (training) /
+  ``omniretriever.data.media.load_video_frames`` (inference), and
+* the audio by ``omniretriever.data.media.load_audio_segment``, from the same
+  mp4 over the same window, in both training and inference.
+
+No clip or wav is written to disk, and records carry no ``audio`` field.
+
+Input is ``youcookii_{train,val}_preprocess.json`` (``{"database": {event_id:
+{video_id, segment, sentence, duration, ...}}}``). Events whose video is not
+under ``--video-root`` are dropped and counted.
+
+Segments are checked against the length of the video actually on disk, read
+from its header, not against the metadata's ``duration``: some downloads are
+shorter than the original upload (``hs2h7nb5PHQ`` is 215.8 s on disk, 316.8 s
+in the metadata). An event that starts less than ``MIN_EVENT_SEC`` before the
+file ends is dropped -- decord turns such a window into out-of-bound frame
+indices and the audio cut comes back empty -- and an event that runs past the
+end is clamped to it.
 
 Usage
 -----
     python scripts/convert_youcookii.py \\
-        --train  "D:/Hoc/KL/Data/YouCookII/YouCookII/metadata/youcookii_train.jsonl" \\
-        --val    "D:/Hoc/KL/Data/YouCookII/YouCookII/metadata/youcookii_val.jsonl"   \\
-        --out_dir "D:/Hoc/KL/Data/YouCookII/YouCookII/metadata"
+        --metadata-dir "D:/Học/KL/Data/YouCookII/metadata" \\
+        --video-root   "D:/Học/KL/Data/YouCookII/videos"
 
-Then launch training with:
+writes ``train_omni_video.jsonl`` and ``val_omni_video.jsonl`` into
+``--metadata-dir``. Train with ``DATA_PATH=.../train_omni_video.jsonl`` and
+``VIDEO_ROOT=.../videos`` (``AUDIO_ROOT`` is no longer used).
 
-    VIDEO_ROOT="D:/Hoc/KL/Data/YouCookII/YouCookII/videos" \\
-    AUDIO_ROOT="D:/Hoc/KL/Data/YouCookII/YouCookII/audio"  \\
-    WAVE_PATH="D:/Hoc/KL/Code/Omni/WAVE_HOME/WAVE-7B"      \\
-    BEATS_PATH="D:/Hoc/KL/Code/Omni/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt" \\
-    DATA_PATH="D:/Hoc/KL/Data/YouCookII/YouCookII/metadata/train_omni.jsonl" \\
-    OUTPUT_DIR="D:/Hoc/KL/Code/Omni/output/omniretriever_youcook" \\
-    bash training/train.sh
-
-Note on path resolution
------------------------
-Filenames in the output are kept as **bare basenames** (e.g. ``GLd3aX16zBg.mp4``).
-The data loader in ``data_qwen.py`` automatically prepends ``$VIDEO_ROOT`` /
-``$AUDIO_ROOT`` to any non-absolute path, so you only ever need to change those
-two environment variables -- not the JSONL itself.
-
-Note on event segmentation
---------------------------
-Each line in youcookii_train.jsonl is already ONE cooking step (event), with
-``timestamps: [start, end]``. The data loader in ``data_qwen.py`` calls
-``video_decord(video_file, timestamps=timestamps)`` which decodes only the
-requested clip from the full video file. No pre-splitting of videos is needed.
+Output record
+-------------
+    {
+      "id": "GLd3aX16zBg_1",
+      "type": "retrieval",
+      "conversations": [
+        {"from": "human", "value": "<video>\\nPlease describe the video."},
+        {"from": "gpt",   "value": "place a slice of cheese on the bread"}
+      ],
+      "video": "GLd3aX16zBg.mp4",        <- bare filename; $VIDEO_ROOT prepended at load time
+      "timestamps": [114.0, 127.0],      <- the event; frames AND audio are cut to it
+      "text": "place a slice of cheese on the bread"
+    }
 """
 
 import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+PROMPT = "<video>\nPlease describe the video."
+SPLITS = ("train", "val")
+# Shortest event kept after clamping to the file: one second, the floor the
+# training loader pads audio to anyway.
+MIN_EVENT_SEC = 1.0
 
 
-# ---------------------------------------------------------------------------
-# Schema helpers
-# ---------------------------------------------------------------------------
+def probe_duration(path: str) -> Optional[float]:
+    """Seconds of the file that both streams cover, from the header only.
 
-def build_omni_record(src: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert one raw YouCookII record to the omni training schema.
-
-    Source schema (youcookii_train.jsonl)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    {
-      "id": "GLd3aX16zBg_1",
-      "conversations": [
-        {"from": "human", "value": "<video>\\nPlease describe the video."},
-        {"from": "gpt",   "value": "place a slice of cheese on the bread"}
-      ],
-      "video":      "GLd3aX16zBg.mp4",    <- bare filename
-      "audio":      "GLd3aX16zBg_1.wav",  <- bare filename
-      "timestamps": [114.0, 127.0],       <- already one event/segment
-      "text":       "place a slice of cheese on the bread"
-    }
-
-    Target schema (train_omni.jsonl)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    {
-      "id": "GLd3aX16zBg_1",
-      "type": "retrieval",               <- required by LazySupervisedDataset
-      "conversations": [...],            <- human / gpt turns, normalised
-      "video":      "GLd3aX16zBg.mp4",  <- bare filename; VIDEO_ROOT prepended at load time
-      "audio":      "GLd3aX16zBg_1.wav",
-      "timestamps": [114.0, 127.0],     <- loader clips video/audio to this segment
-      "text":       "..."               <- caption, kept for reference
-    }
+    The shorter of the video and audio stream: a frame window past the audio's
+    end would pair with a silent tail. ``None`` when the file cannot be opened
+    or has no audio stream, which the loader cannot cut an event's audio from.
     """
-    record: Dict[str, Any] = {}
+    import av
 
-    # ---- identity -----------------------------------------------------------
-    record["id"] = src.get("id", "")
-
-    # ---- type ---------------------------------------------------------------
-    # "retrieval" is the default in LazySupervisedDataset; keeps InfoNCE losses active.
-    record["type"] = src.get("type", "retrieval")
-
-    # ---- conversations ------------------------------------------------------
-    convs = src.get("conversations", [])
-    # Ensure the human turn uses <video> token (not <image>)
-    normalised_convs = []
-    for turn in convs:
-        t = dict(turn)
-        if t.get("from") == "human":
-            val = t.get("value", "")
-            # Replace <image> with <video> when the record has a video field
-            if "<image>" in val and "video" in src:
-                val = val.replace("<image>", "<video>")
-            # Ensure the <video> tag is on its own line at the start
-            if "video" in src and not val.startswith("<video>"):
-                val = "<video>\n" + val.lstrip()
-            t["value"] = val
-        normalised_convs.append(t)
-    record["conversations"] = normalised_convs
-
-    # ---- media paths --------------------------------------------------------
-    # Keep as bare filenames; VIDEO_ROOT / AUDIO_ROOT are prepended by the loader.
-    if "video" in src:
-        record["video"] = src["video"]
-
-    if "audio" in src:
-        record["audio"] = src["audio"]
-
-    if "image" in src:
-        record["image"] = src["image"]
-
-    if "frame_dir" in src:
-        record["frame_dir"] = src["frame_dir"]
-
-    # ---- timestamps ---------------------------------------------------------
-    # Each YouCookII record is already ONE segment; timestamps tell the loader
-    # which slice of the full video/audio to decode -- no further splitting needed.
-    if "timestamps" in src:
-        ts = src["timestamps"]
-        if isinstance(ts, (list, tuple)) and len(ts) == 2:
-            record["timestamps"] = [float(ts[0]), float(ts[1])]
-
-    # ---- caption / text reference -------------------------------------------
-    if "text" in src:
-        record["text"] = src["text"]
-
-    return record
+    try:
+        with av.open(path) as container:
+            if not container.streams.video or not container.streams.audio:
+                return None
+            spans = [
+                float(s.duration * s.time_base)
+                for s in (container.streams.video[0], container.streams.audio[0])
+                if s.duration and s.time_base
+            ]
+            if not spans and container.duration:
+                spans = [container.duration / 1e6]
+            return min(spans) if spans else None
+    except Exception:  # noqa: BLE001 - PyAV raises several error types
+        return None
 
 
-# ---------------------------------------------------------------------------
-# I/O helpers
-# ---------------------------------------------------------------------------
+def probe_durations(video_root: str, names: Iterable[str], workers: int) -> Dict[str, Optional[float]]:
+    names = sorted(set(names))
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        spans = pool.map(lambda n: probe_duration(os.path.join(video_root, n)), names)
+        return dict(zip(names, spans))
 
-def read_jsonl(path: str) -> List[Dict[str, Any]]:
+
+def build_record(event_id: str, event: Dict[str, Any], start: float, end: float) -> Dict[str, Any]:
+    caption = event["sentence"].strip()
+    return {
+        "id": event_id,
+        "type": "retrieval",
+        "conversations": [
+            {"from": "human", "value": PROMPT},
+            {"from": "gpt", "value": caption},
+        ],
+        "video": f"{event['video_id']}.mp4",
+        "timestamps": [float(start), float(end)],
+        "text": caption,
+    }
+
+
+def convert(src_path: str, video_root: str, workers: int = 8) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    with open(src_path, "r", encoding="utf-8") as f:
+        database = json.load(f)["database"]
+
+    available = {name for name in os.listdir(video_root) if name.endswith(".mp4")}
+    wanted = {f"{e['video_id']}.mp4" for e in database.values()} & available
+    durations = probe_durations(video_root, wanted, workers)
+
     records = []
-    with open(path, "r", encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                print(f"[WARN] Skipping malformed line {lineno} in {path}: {exc}",
-                      file=sys.stderr)
-    return records
+    stats = {"events": len(database), "missing_video": 0, "unreadable_video": 0,
+             "bad_segment": 0, "past_video_end": 0, "clamped_end": 0}
+    for event_id, event in database.items():
+        name = f"{event['video_id']}.mp4"
+        start, end = float(event["segment"][0]), float(event["segment"][1])
+        if name not in available:
+            stats["missing_video"] += 1
+            continue
+        if durations[name] is None:
+            stats["unreadable_video"] += 1
+            continue
+        if end <= start:
+            stats["bad_segment"] += 1
+            continue
+        if start > durations[name] - MIN_EVENT_SEC:
+            stats["past_video_end"] += 1
+            continue
+        if end > durations[name]:
+            stats["clamped_end"] += 1
+            end = round(durations[name], 3)
+        records.append(build_record(event_id, event, start, end))
+    stats["written"] = len(records)
+    stats["videos"] = len({r["video"] for r in records})
+    return records, stats
 
 
 def write_jsonl(records: List[Dict[str, Any]], path: str) -> None:
@@ -167,82 +153,38 @@ def write_jsonl(records: List[Dict[str, Any]], path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"  Written {len(records):,} records -> {path}")
 
-
-def convert(src_path: str, dst_path: str) -> None:
-    print(f"\nConverting: {src_path}")
-    raw = read_jsonl(src_path)
-    converted = [build_omni_record(r) for r in raw]
-
-    # Basic stats
-    n_video = sum(1 for r in converted if "video" in r)
-    n_audio = sum(1 for r in converted if "audio" in r)
-    n_ts    = sum(1 for r in converted if "timestamps" in r)
-    print(f"  Records         : {len(converted):,}")
-    print(f"  With video      : {n_video:,}")
-    print(f"  With audio      : {n_audio:,}")
-    print(f"  With timestamps : {n_ts:,}  <- each is already one event segment")
-
-    write_jsonl(converted, dst_path)
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Convert YouCookII metadata JSONL -> train_omni.jsonl"
-    )
-    parser.add_argument(
-        "--train",
-        default="D:/Hoc/KL/Data/YouCookII/YouCookII/metadata/youcookii_train.jsonl",
-        help="Path to youcookii_train.jsonl",
-    )
-    parser.add_argument(
-        "--val",
-        default="D:/Hoc/KL/Data/YouCookII/YouCookII/metadata/youcookii_val.jsonl",
-        help="Path to youcookii_val.jsonl  (optional; skip if file does not exist)",
-    )
-    parser.add_argument(
-        "--out_dir",
-        default="D:/Hoc/KL/Data/YouCookII/YouCookII/metadata",
-        help="Output directory for train_omni.jsonl / val_omni.jsonl",
-    )
+    parser = argparse.ArgumentParser(description="YouCookII metadata -> video-only event manifests")
+    parser.add_argument("--metadata-dir", default="D:/Học/KL/Data/YouCookII/metadata",
+                        help="Folder holding youcookii_{train,val}_preprocess.json")
+    parser.add_argument("--video-root", default="D:/Học/KL/Data/YouCookII/videos",
+                        help="Folder holding the full <video_id>.mp4 files")
+    parser.add_argument("--out-dir", default=None,
+                        help="Where to write {train,val}_omni_video.jsonl (default: --metadata-dir)")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="Threads for reading video headers (default 8; more helps on a Drive mount)")
     args = parser.parse_args()
+    out_dir = args.out_dir or args.metadata_dir
 
-    # --- training split ---
-    if os.path.isfile(args.train):
-        convert(
-            args.train,
-            os.path.join(args.out_dir, "train_omni.jsonl"),
-        )
-    else:
-        print(f"[ERROR] Train file not found: {args.train}", file=sys.stderr)
-        sys.exit(1)
+    if not os.path.isdir(args.video_root):
+        sys.exit(f"[ERROR] video root not found: {args.video_root}")
 
-    # --- validation split (optional) ---
-    if args.val and os.path.isfile(args.val):
-        convert(
-            args.val,
-            os.path.join(args.out_dir, "val_omni.jsonl"),
-        )
-    else:
-        print(f"[INFO] Val file not found or not provided, skipping: {args.val}")
-
-    print("\n=== Done! ===")
-    print("Next steps:")
-    print("  1. Set VIDEO_ROOT and AUDIO_ROOT env vars.")
-    print("  2. Pass DATA_PATH=<out_dir>/train_omni.jsonl to train.sh.")
-    print("\nExample launch command:")
-    print('  VIDEO_ROOT="D:/Hoc/KL/Data/YouCookII/YouCookII/videos" \\')
-    print('  AUDIO_ROOT="D:/Hoc/KL/Data/YouCookII/YouCookII/audio"  \\')
-    print('  WAVE_PATH="D:/Hoc/KL/Code/Omni/WAVE_HOME/WAVE-7B"      \\')
-    print('  BEATS_PATH="D:/Hoc/KL/Code/Omni/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt" \\')
-    print('  DATA_PATH="<out_dir>/train_omni.jsonl"                  \\')
-    print('  OUTPUT_DIR="D:/Hoc/KL/Code/Omni/output/omniretriever_youcook" \\')
-    print('  bash training/train.sh')
+    for split in SPLITS:
+        src = os.path.join(args.metadata_dir, f"youcookii_{split}_preprocess.json")
+        if not os.path.isfile(src):
+            print(f"[WARN] {src} not found, skipping {split}")
+            continue
+        records, stats = convert(src, args.video_root, args.workers)
+        dst = os.path.join(out_dir, f"{split}_omni_video.jsonl")
+        write_jsonl(records, dst)
+        print(f"{split:5s}: {stats['written']:,} events from {stats['videos']:,} videos -> {dst}"
+              f"  (of {stats['events']:,}; missing video {stats['missing_video']},"
+              f" unreadable/no audio {stats['unreadable_video']},"
+              f" bad segment {stats['bad_segment']},"
+              f" starts past video end {stats['past_video_end']},"
+              f" end clamped {stats['clamped_end']})")
 
 
 if __name__ == "__main__":

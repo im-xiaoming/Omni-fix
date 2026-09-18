@@ -42,7 +42,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Multimodal Retrieval Demo")
     parser.add_argument("--base-model", type=str, default="D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")
     parser.add_argument("--adapter", type=str, default="D:/Học/KL/Code/Omni/adapters/omniretriever-7b")
-    parser.add_argument("--val-manifest", type=str, default="D:/Học/KL/Data/YouCookII/YouCookII/metadata/val_omni.jsonl")
+    parser.add_argument("--val-manifest", type=str, default="D:/Học/KL/Data/YouCookII/metadata/val_omni_video.jsonl")
     parser.add_argument("--gallery-embeds", type=str, default="output/val_embeds.npz", help="Precomputed gallery embeddings from eval_youcookii.py")
     parser.add_argument("--query", type=str, default=None, help="Text query to search for videos")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results to return")

@@ -21,7 +21,8 @@
 #
 # Media root dirs (optional – only needed when JSONL contains bare filenames):
 #   VIDEO_ROOT       root directory for video files  (e.g. /data/videos)
-#   AUDIO_ROOT       root directory for audio files  (e.g. /data/audio)
+#   AUDIO_ROOT       root directory for audio files  (e.g. /data/audio). Only records with an
+#                    "audio" field use it; video-only records cut the event audio out of the video.
 #   IMAGE_ROOT       root directory for image files  (e.g. /data/images)
 #
 # Example:
@@ -49,9 +50,9 @@ export PYTHONUNBUFFERED=1
 # --- default paths if not set by environment ---
 WAVE_PATH="${WAVE_PATH:-$(cd -- "${REPO_ROOT}/../../WAVE_HOME/WAVE-7B" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")}"
 BEATS_PATH="${BEATS_PATH:-$(cd -- "${REPO_ROOT}/../../WAVE_HOME" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/WAVE_HOME")/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt}"
-DATA_PATH="${DATA_PATH:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/YouCookII/metadata" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/YouCookII/metadata")/train_omni.jsonl}"
-VIDEO_ROOT="${VIDEO_ROOT:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/YouCookII/videos" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/YouCookII/videos")}"
-AUDIO_ROOT="${AUDIO_ROOT:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/YouCookII/audio" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/YouCookII/audio")}"
+DATA_PATH="${DATA_PATH:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/metadata" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/metadata")/train_omni_video.jsonl}"
+VIDEO_ROOT="${VIDEO_ROOT:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/videos" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/videos")}"
+AUDIO_ROOT="${AUDIO_ROOT:-$(cd -- "${REPO_ROOT}/../../../../Data/YouCookII/audio" 2>/dev/null && pwd || echo "D:/Học/KL/Data/YouCookII/audio")}"
 LORA_CKPT="${LORA_CKPT:-$(cd -- "${REPO_ROOT}/../../adapters/omniretriever-7b" 2>/dev/null && pwd || echo "D:/Học/KL/Code/Omni/adapters/omniretriever-7b")}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/output/omniretriever_7b}"
 

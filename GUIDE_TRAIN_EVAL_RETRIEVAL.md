@@ -2,7 +2,7 @@
 
 Tài liệu này hướng dẫn toàn bộ quy trình thực hiện với mô hình **OmniRetriever-7B** trên bộ dữ liệu **YouCookII**:
 1. **Fine-tuning**: Huấn luyện thích nghi miền từ adapter có sẵn.
-2. **Evaluation**: Đánh giá các chỉ số truy vấn (Recall@1/5/10, MRR, Median Rank) trên tập Validation (`val_omni.jsonl`).
+2. **Evaluation**: Đánh giá các chỉ số truy vấn (Recall@1/5/10, MRR, Median Rank) trên tập Validation (`val_omni_video.jsonl`).
 3. **Retrieval**: Thực hiện tìm kiếm video từ văn bản (Text $\rightarrow$ Video) hoặc ngược lại.
 
 ---
@@ -15,12 +15,65 @@ Toàn bộ script trong repository đã được cấu hình sẵn các đườn
 | :--- | :--- | :--- |
 | **`WAVE_PATH`** | `D:\Học\KL\Code\Omni\WAVE_HOME\WAVE-7B` | Trọng số mô hình nền WAVE-7B |
 | **`BEATS_PATH`** | `D:\Học\KL\Code\Omni\WAVE_HOME\BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt` | Checkpoint Audio Encoder BEATs |
-| **`DATA_PATH`** | `D:\Học\KL\Data\YouCookII\YouCookII\metadata\train_omni.jsonl` | Tập metadata huấn luyện (8,816 mẫu) |
-| **`VAL_MANIFEST`** | `D:\Học\KL\Data\YouCookII\YouCookII\metadata\val_omni.jsonl` | Tập metadata validation (3,110 mẫu) |
-| **`VIDEO_ROOT`** | `D:\Học\KL\Data\YouCookII\YouCookII\videos` | Thư mục chứa các file video `.mp4` |
-| **`AUDIO_ROOT`** | `D:\Học\KL\Data\YouCookII\YouCookII\audio` | Thư mục chứa các file audio `.wav` |
+| **`DATA_PATH`** | `D:\Học\KL\Data\YouCookII\metadata\train_omni_video.jsonl` | Manifest huấn luyện, chỉ có video (8,560 event) |
+| **`VAL_MANIFEST`** | `D:\Học\KL\Data\YouCookII\metadata\val_omni_video.jsonl` | Manifest validation, chỉ có video (3,030 event) |
+| **`VIDEO_ROOT`** | `D:\Học\KL\Data\YouCookII\videos` | Thư mục chứa các video gốc `<video_id>.mp4` |
+| ~~`AUDIO_ROOT`~~ | không còn dùng | Audio của từng event được cắt từ chính video (xem mục 0.1) |
 | **`LORA_CKPT`** | `D:\Học\KL\Code\Omni\adapters\omniretriever-7b` | Adapter LoRA gốc của OmniRetriever |
 | **`OUTPUT_DIR`** | `D:\Học\KL\Code\Omni\Omni-fix\training\output\omniretriever_7b` | Thư mục lưu checkpoint sau khi train |
+
+### 0.1 Đầu vào chỉ là video: cắt event theo metadata
+
+Đầu vào duy nhất là video gốc `<video_id>.mp4`. Mỗi **event** (một bước nấu ăn trong metadata) là một record
+có `timestamps = [start, end]`. Lúc nạp dữ liệu, event được cắt ra **ngay trong bộ nhớ**, không ghi clip hay
+file `.wav` nào ra đĩa:
+
+* **Frames**: lấy mẫu 8 frame trong cửa sổ `[start, end]` của video.
+* **Audio**: cắt track audio của **chính video đó** trên **cùng cửa sổ** `[start, end]`
+  (`omniretriever.data.media.load_audio_segment`: seek tới `start`, decode tới `end`, trộn mono, resample 16 kHz),
+  rồi center-crop/pad về 8 s (`fit_waveform`).
+
+Training (`training/qwenvl/data/data_qwen.py`) và inference (`src/omniretriever/...`, `scripts/eval_youcookii.py`)
+dùng **chung** hai hàm cắt audio trên, nên event được cắt giống hệt nhau ở cả hai phía. Đã kiểm chứng: audio cắt
+theo cách này trùng với các file `.wav` cắt sẵn trong `Data/YouCookII/audio` (tương quan ≥ 0.99, lệch 0 ms, đúng độ dài).
+
+Sinh manifest (chạy một lần, chỉ đọc header video, không cần GPU):
+
+```powershell
+python scripts/convert_youcookii.py `
+    --metadata-dir "D:\Học\KL\Data\YouCookII\metadata" `
+    --video-root   "D:\Học\KL\Data\YouCookII\videos"
+```
+
+Script đối chiếu `segment` với **độ dài thật** của file video trên đĩa (một số video tải về ngắn hơn metadata):
+event bắt đầu sau khi video đã hết bị loại, event chạy quá cuối video được cắt về cuối video. Kết quả:
+
+| Split | Event trong metadata | Thiếu video | Bắt đầu sau cuối video | Clamp `end` | Ghi ra |
+| :-- | --: | --: | --: | --: | --: |
+| train | 8,815 | 252 | 3 | 1 | **8,560** |
+| val | 3,109 | 78 | 1 | 0 | **3,030** |
+
+Record mẫu (không có trường `audio`):
+
+```json
+{"id": "GLd3aX16zBg_1", "type": "retrieval",
+ "conversations": [{"from": "human", "value": "<video>\nPlease describe the video."},
+                   {"from": "gpt", "value": "place a slice of cheese on the bread"}],
+ "video": "GLd3aX16zBg.mp4", "timestamps": [114.0, 127.0],
+ "text": "place a slice of cheese on the bread"}
+```
+
+Kiểm tra trước khi train (đọc header, không cần GPU) — cả hai split phải báo coverage 100%:
+
+```bash
+VIDEO_ROOT=/path/to/YouCookII/videos python scripts/check_tuple_data.py /path/to/metadata/train_omni_video.jsonl
+```
+
+Trên Colab, chạy thêm `scripts/test_pipeline.py` (chỉ cần processor, không nạp trọng số) để xem tensor video/audio
+thật của vài event: `WAVE_PATH=... DATA_PATH=... VIDEO_ROOT=... python scripts/test_pipeline.py`.
+
+> Manifest có trường `audio` (layout cũ `train_omni.jsonl` + thư mục `audio/`) vẫn chạy được: record có `audio`
+> đọc file đó, record không có `audio` thì cắt từ video.
 
 ---
 
@@ -76,11 +129,10 @@ $env:PYTHONIOENCODING = "utf-8"
 ```bash
 cd /path/to/Omni-fix
 
-export VIDEO_ROOT="D:/Học/KL/Data/YouCookII/YouCookII/videos"
-export AUDIO_ROOT="D:/Học/KL/Data/YouCookII/YouCookII/audio"
+export VIDEO_ROOT="D:/Học/KL/Data/YouCookII/videos"
 export WAVE_PATH="D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B"
 export BEATS_PATH="D:/Học/KL/Code/Omni/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"
-export DATA_PATH="D:/Học/KL/Data/YouCookII/YouCookII/metadata/train_omni.jsonl"
+export DATA_PATH="D:/Học/KL/Data/YouCookII/metadata/train_omni_video.jsonl"
 export LORA_CKPT="D:/Học/KL/Code/Omni/adapters/omniretriever-7b"
 export OUTPUT_DIR="./output/youcookii_ft"
 
@@ -97,7 +149,7 @@ bash training/train.sh
 
 ## 2. Giai đoạn 2: Đánh giá mô hình (Evaluation)
 
-Trong bài toán Video/Audio-Text Retrieval, việc đánh giá không dùng cross-entropy loss thông thường mà đo trực tiếp bằng các chỉ số xếp hạng tìm kiếm trên tập Validation (`val_omni.jsonl`):
+Trong bài toán Video/Audio-Text Retrieval, việc đánh giá không dùng cross-entropy loss thông thường mà đo trực tiếp bằng các chỉ số xếp hạng tìm kiếm trên tập Validation (`val_omni_video.jsonl`):
 * **Recall@1 (R@1)**: Tỷ lệ tìm đúng video clip ở vị trí đầu tiên.
 * **Recall@5 (R@5)**: Tỷ lệ đúng nằm trong top 5 kết quả.
 * **Recall@10 (R@10)**: Tỷ lệ đúng nằm trong top 10 kết quả.
@@ -115,7 +167,7 @@ python scripts/eval_youcookii.py `
     --adapter "D:\Học\KL\Code\Omni\adapters\omniretriever-7b" `
     --max-samples 100
 
-# Hoặc chạy toàn bộ 3,110 mẫu validation và lưu embedding:
+# Hoặc chạy toàn bộ 3,030 event validation và lưu embedding:
 python scripts/eval_youcookii.py `
     --adapter "D:\Học\KL\Code\Omni\adapters\omniretriever-7b" `
     --save-embeds "output/baseline_val_embeds.npz" `
@@ -201,8 +253,12 @@ model = OmniRetriever.from_pretrained(
 # 2. Mã hóa câu văn bản truy vấn ra vector 3584 chiều
 z_text = model.encode_text("chop onions and garlic")
 
-# 3. Mã hóa video clip (hình ảnh + âm thanh)
-z_video = model.encode_av("D:/Học/KL/Data/YouCookII/YouCookII/videos/sample.mp4")
+# 3. Mã hóa một event (hình ảnh + âm thanh) cắt từ video gốc theo metadata.
+#    timestamps cắt frames; audio_path=video + audio_timestamps cắt audio của chính
+#    video trên cùng cửa sổ -- đúng như lúc train.
+video = "D:/Học/KL/Data/YouCookII/videos/GLd3aX16zBg.mp4"
+event = (114.0, 127.0)
+z_video = model.encode_av(video, timestamps=event, audio_path=video, audio_timestamps=event)
 
 # 4. Tính độ tương đồng Cosine
 score = float(z_text @ z_video.T)

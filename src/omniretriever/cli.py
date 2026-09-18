@@ -47,6 +47,12 @@ def extract_main(argv: list[str] | None = None) -> int:
     cut from one source video would land on the same embedding. The benchmark
     ships its clips already cut, so its records carry no ``timestamps`` and every
     file is read whole.
+
+    A record with no ``audio`` field takes its audio from its ``video``: the
+    ``audio``, ``av`` and ``at`` embeddings then cut the event's audio out of the
+    video over the same ``timestamps`` window as its frames. That is the
+    video-only layout ``scripts/convert_youcookii.py`` writes, and the one
+    training reads.
     """
     parser = _build_extract_parser()
     args = parser.parse_args(argv)
@@ -59,6 +65,7 @@ def extract_main(argv: list[str] | None = None) -> int:
     records = _resolve_media_paths(_load_manifest(args.manifest), args.media_root)
     _warn_missing_media(records)
     windows_by_id = _windows_by_id(records)
+    audio_windows_by_id = _audio_windows_by_id(records, windows_by_id)
     out: dict[str, np.ndarray] = {}
     if args.resume and partial_path.is_file():
         with np.load(partial_path) as blob:
@@ -86,27 +93,33 @@ def extract_main(argv: list[str] | None = None) -> int:
     # (video, audio) for av, (media, caption) for the other two -- and are
     # transposed back into two parallel lists here.
     #
-    # Only the three video-bearing encoders are given the record's window. The
-    # audio field of a segmented manifest already points at a per-segment file,
-    # so windowing it again would cut a segment out of a segment; av windows its
-    # frames only, for the same reason.
+    # The frames always take the record's window. The audio takes it only when
+    # it is cut out of the record's video (audio_windows_by_id): a separate
+    # audio file of a segmented manifest is already the segment, so windowing it
+    # again would cut a segment out of a segment.
     encoders = {
-        "text": lambda values, windows: model.encode_text(values),
-        "video": lambda values, windows: model.encode_video(values, windows),
-        "audio": lambda values, windows: model.encode_audio(values),
-        "av": lambda values, windows: model.encode_av(
-            [video for video, _ in values], windows, [audio for _, audio in values]
+        "text": lambda values, windows, audio_windows: model.encode_text(values),
+        "video": lambda values, windows, audio_windows: model.encode_video(values, windows),
+        "audio": lambda values, windows, audio_windows: model.encode_audio(values, audio_windows),
+        "av": lambda values, windows, audio_windows: model.encode_av(
+            [video for video, _ in values], windows, [audio for _, audio in values],
+            audio_windows,
         ),
-        "tv": lambda values, windows: model.encode_tv(*_unzip(values), windows),
-        "at": lambda values, windows: model.encode_at(*_unzip(values)),
+        "tv": lambda values, windows, audio_windows: model.encode_tv(*_unzip(values), windows),
+        "at": lambda values, windows, audio_windows: model.encode_at(
+            *_unzip(values), audio_windows
+        ),
     }
 
     batches = _batches(todo, args.batch_size)
-    stream = _with_prefetch(batches, model.config, args.prefetch, windows_by_id)
+    stream = _with_prefetch(
+        batches, model.config, args.prefetch, windows_by_id, audio_windows_by_id
+    )
     for done, (modality, chunk) in enumerate(_progress(stream, "extracting", len(batches)), start=1):
         values = [value for _, value in chunk]
         windows = [windows_by_id.get(record_id) for record_id, _ in chunk]
-        vectors = encoders[modality](values, windows).cpu().float().numpy()
+        audio_windows = [audio_windows_by_id.get(record_id) for record_id, _ in chunk]
+        vectors = encoders[modality](values, windows, audio_windows).cpu().float().numpy()
         for (record_id, _), vector in zip(chunk, vectors):
             out[f"{record_id}__{modality}"] = vector
         if done % args.checkpoint_every == 0:
@@ -230,6 +243,23 @@ def _windows_by_id(records: list[dict]) -> dict[str, tuple[float, float]]:
     return windows
 
 
+def _audio_source(record: dict) -> str | None:
+    """The file a record's audio is read from: its own ``audio``, else its ``video``."""
+    return record.get("audio") or record.get("video")
+
+
+def _audio_windows_by_id(
+    records: list[dict], windows: Mapping[str, tuple[float, float]]
+) -> dict[str, tuple[float, float]]:
+    """The audio windows: a record's ``timestamps``, only where its audio is cut
+    out of its video. A record with its own ``audio`` file is read whole."""
+    return {
+        record["id"]: windows[record["id"]]
+        for record in records
+        if not record.get("audio") and record.get("video") and record["id"] in windows
+    }
+
+
 def _plan(
     records: list[dict],
     done: Mapping[str, np.ndarray],
@@ -245,16 +275,16 @@ def _plan(
     sources = {
         "text": lambda r: r.get("text"),
         "video": lambda r: r.get("video"),
-        "audio": lambda r: r.get("audio"),
-        # (video, audio): the frames come from one file and the waveform from the
-        # other, which is how the benchmark ships them and how training reads
-        # them. See OmniRetriever.encode_av.
-        "av": lambda r: (r["video"], r["audio"]) if r.get("video") and r.get("audio") else None,
+        "audio": _audio_source,
+        # (video, audio): the frames come from the video and the waveform from
+        # the audio file, or from the video itself when the record has none.
+        # See OmniRetriever.encode_av.
+        "av": lambda r: (r["video"], _audio_source(r)) if r.get("video") else None,
         # tv and at ride on encoders added downstream (see the note in
         # omniretriever.inference.encode); their inputs are (media, caption)
         # pairs rather than a single path.
         "tv": lambda r: (r["video"], r["text"]) if r.get("video") and r.get("text") else None,
-        "at": lambda r: (r["audio"], r["text"]) if r.get("audio") and r.get("text") else None,
+        "at": lambda r: (_audio_source(r), r["text"]) if _audio_source(r) and r.get("text") else None,
     }
 
     plan: list[tuple[str, list]] = []
@@ -303,7 +333,11 @@ def _batches(todo: Sequence[tuple[str, list]], batch_size: int) -> list[tuple[st
     return [chunk for record_chunks in by_record.values() for chunk in record_chunks]
 
 
-def _media_keys(batch: tuple[str, list], windows: Mapping[str, tuple]) -> list[tuple]:
+def _media_keys(
+    batch: tuple[str, list],
+    windows: Mapping[str, tuple],
+    audio_windows: Mapping[str, tuple],
+) -> list[tuple]:
     """The ``(kind, path, window)`` triples a batch will decode.
 
     The window belongs in the key because it is part of the loader's cache key
@@ -314,17 +348,17 @@ def _media_keys(batch: tuple[str, list], windows: Mapping[str, tuple]) -> list[t
     keys = []
     for record_id, value in chunk:
         window = windows.get(record_id)
+        audio_window = audio_windows.get(record_id)
         # av carries (video, audio); tv and at carry (media, caption), so their
         # one path is the first element either way.
         if modality in ("video", "tv"):
             keys.append(("video", value[0] if modality == "tv" else value, window))
         elif modality in ("audio", "at"):
-            keys.append(("audio", value[0] if modality == "at" else value, None))
+            keys.append(("audio", value[0] if modality == "at" else value, audio_window))
         elif modality == "av":
             video, audio = value
             keys.append(("video", video, window))
-            # Not windowed, matching the encoders map in extract_main.
-            keys.append(("audio", audio, None))
+            keys.append(("audio", audio, audio_window))
     return keys
 
 
@@ -353,6 +387,7 @@ def _with_prefetch(
     config,
     workers: int,
     windows: Mapping[str, tuple],
+    audio_windows: Mapping[str, tuple],
 ) -> Iterable:
     """Yield batches while decoding upcoming ones on a thread pool.
 
@@ -381,7 +416,7 @@ def _with_prefetch(
         submitted = 0
         for index, batch in enumerate(batches):
             while submitted < min(index + 1 + lookahead, len(batches)):
-                for key in _media_keys(batches[submitted], windows):
+                for key in _media_keys(batches[submitted], windows, audio_windows):
                     if key not in queued:
                         queued.add(key)
                         pool.submit(_warm, key, config)

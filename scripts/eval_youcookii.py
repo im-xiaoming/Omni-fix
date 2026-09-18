@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Evaluation script for OmniRetriever on YouCookII Validation Set (val_omni.jsonl).
+Evaluation script for OmniRetriever on YouCookII Validation Set (val_omni_video.jsonl).
+
+The input is the full videos only: each record is one event, and its frames and
+audio are both cut out of <video_id>.mp4 over the record's ``timestamps`` by the
+same training loader (LazySupervisedDataset), so evaluation sees events exactly
+as training did. Build the manifest with scripts/convert_youcookii.py.
+
 Supports Text-to-Video/Audio (t2m) and Video/Audio-to-Text (m2t) retrieval metrics:
 - Recall@1, Recall@5, Recall@10
 - Mean Reciprocal Rank (MRR)
@@ -14,7 +20,7 @@ Usage:
     # Đánh giá checkpoint sau khi fine-tune:
     python scripts/eval_youcookii.py \
         --adapter "D:/Học/KL/Code/Omni/Omni-fix/training/output/omniretriever_7b" \
-        --max-samples 500   # hoặc bỏ --max-samples để chạy toàn bộ 3110 mẫu
+        --max-samples 500   # hoặc bỏ --max-samples để chạy toàn bộ 3030 event
 """
 
 # Tránh lỗi circular import giữa deepspeed và transformers.modeling_utils
@@ -55,9 +61,11 @@ def parse_args():
     parser.add_argument("--base-model", type=str, default="D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")
     parser.add_argument("--beats-path", type=str, default="D:/Học/KL/Code/Omni/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt")
     parser.add_argument("--adapter", type=str, default="D:/Học/KL/Code/Omni/adapters/omniretriever-7b")
-    parser.add_argument("--val-manifest", type=str, default="D:/Học/KL/Data/YouCookII/YouCookII/metadata/val_omni.jsonl")
-    parser.add_argument("--video-root", type=str, default="D:/Học/KL/Data/YouCookII/YouCookII/videos")
-    parser.add_argument("--audio-root", type=str, default="D:/Học/KL/Data/YouCookII/YouCookII/audio")
+    parser.add_argument("--val-manifest", type=str, default="D:/Học/KL/Data/YouCookII/metadata/val_omni_video.jsonl")
+    parser.add_argument("--video-root", type=str, default="D:/Học/KL/Data/YouCookII/videos")
+    parser.add_argument("--audio-root", type=str, default="D:/Học/KL/Data/YouCookII/audio",
+                        help="Only read for manifest records that carry an 'audio' field; "
+                             "video-only records cut their audio out of the video.")
     parser.add_argument("--output", type=str, default="./output/eval_youcookii_results.json")
     parser.add_argument("--save-embeds", type=str, default=None, help="Optional path to save embeddings .npz")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit number of validation samples for quick check")

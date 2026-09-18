@@ -21,16 +21,16 @@ _CODE_ROOT   = _OMNI_ROOT.parent                   # .../KL/Code
 _KL_ROOT     = _CODE_ROOT.parent                   # .../Học/KL  (cùng cấp với Data)
 
 REPO_ROOT  = _REPO_ROOT / "training"
-WAVE_BASE  = _OMNI_ROOT / "WAVE_HOME" / "WAVE-7B"
-DATA_JSONL = _KL_ROOT   / "Data" / "YouCookII" / "YouCookII" / "metadata" / "train_omni.jsonl"
-VIDEO_ROOT = _KL_ROOT   / "Data" / "YouCookII" / "YouCookII" / "videos"
-AUDIO_ROOT = _KL_ROOT   / "Data" / "YouCookII" / "YouCookII" / "audio"
+# Manifest chỉ có video (scripts/convert_youcookii.py): mỗi record là một event,
+# frames và audio đều được cắt từ <video_id>.mp4 theo "timestamps" -> không cần AUDIO_ROOT.
+# Trên Colab: đặt WAVE_PATH / DATA_PATH / VIDEO_ROOT trước khi chạy.
+WAVE_BASE  = Path(os.environ.get("WAVE_PATH", _OMNI_ROOT / "WAVE_HOME" / "WAVE-7B"))
+DATA_JSONL = Path(os.environ.get("DATA_PATH", _KL_ROOT / "Data" / "YouCookII" / "metadata" / "train_omni_video.jsonl"))
+VIDEO_ROOT = Path(os.environ.get("VIDEO_ROOT", _KL_ROOT / "Data" / "YouCookII" / "videos"))
 
 # Resolve và set env vars
 VIDEO_ROOT = str(VIDEO_ROOT.resolve())
-AUDIO_ROOT = str(AUDIO_ROOT.resolve())
 os.environ["VIDEO_ROOT"] = VIDEO_ROOT
-os.environ["AUDIO_ROOT"] = AUDIO_ROOT
 os.environ["DATA_LOADING_LOG"] = str(Path(__file__).parent.parent / "tmp" / "data_loading.log")
 
 sys.path.insert(0, str(REPO_ROOT))
@@ -62,7 +62,6 @@ checks = {
     "WAVE_BASE (Processor)": WAVE_BASE.resolve(),
     "DATA_JSONL":            DATA_JSONL.resolve(),
     "VIDEO_ROOT":            Path(VIDEO_ROOT),
-    "AUDIO_ROOT":            Path(AUDIO_ROOT),
 }
 all_ok = True
 for name, p in checks.items():
@@ -138,7 +137,7 @@ sample_meta = dataset.list_data_dict[0]
 info(f"Sample[0] keys: {list(sample_meta.keys())}")
 info(f"  type       : {sample_meta.get('type')}")
 info(f"  video      : {sample_meta.get('video')}")
-info(f"  audio      : {sample_meta.get('audio')}")
+info(f"  audio      : {sample_meta.get('audio') or '(cắt từ video theo timestamps)'}")
 info(f"  timestamps : {sample_meta.get('timestamps')}")
 info(f"  conv[0]    : {sample_meta['conversations'][0]['from']} → {sample_meta['conversations'][0]['value'][:80]!r}")
 
@@ -176,10 +175,20 @@ for idx in indices:
         tok_shape  = sample.get("input_ids", None)
         tok_shape  = tok_shape.shape if tok_shape is not None else "N/A"
 
+        # Audio cắt lỗi sẽ bị thay bằng silence mà không raise -> kiểm tra biên độ.
+        raw_wav = sample.get("input_raw_wav", None)
+        peak = float(raw_wav.abs().max()) if raw_wav is not None else 0.0
+
         ok(f"[{idx:5d}] {vid} ts={ts} [{elapsed:.1f}s]")
         info(f"         video_tensor : {vid_shape}")
         info(f"         audio_feat   : {aud_shape}")
+        info(f"         raw_wav      : {tuple(raw_wav.shape) if raw_wav is not None else 'N/A'} peak={peak:.3f}")
         info(f"         input_ids    : {tok_shape}")
+        if peak == 0.0:
+            warn(f"[{idx:5d}] audio toàn silence -- event không cắt được audio từ video")
+            results["errors"].append(f"[{idx}] silent audio")
+            results["fail"] += 1
+            continue
         results["ok"] += 1
 
     except Exception as e:

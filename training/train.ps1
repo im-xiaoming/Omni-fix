@@ -67,16 +67,16 @@ if (-not $BeatsPath) {
     if (Test-Path $candidate) { $BeatsPath = $candidate } else { $BeatsPath = "D:\Học\KL\Code\Omni\WAVE_HOME\BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt" }
 }
 if (-not $DataPath) {
-    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\YouCookII\metadata\train_omni.jsonl"))
-    if (Test-Path $candidate) { $DataPath = $candidate } else { $DataPath = "D:\Học\KL\Data\YouCookII\YouCookII\metadata\train_omni.jsonl" }
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\metadata\train_omni_video.jsonl"))
+    if (Test-Path $candidate) { $DataPath = $candidate } else { $DataPath = "D:\Học\KL\Data\YouCookII\metadata\train_omni_video.jsonl" }
 }
 if (-not $VideoRoot) {
-    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\YouCookII\videos"))
-    if (Test-Path $candidate) { $VideoRoot = $candidate } else { $VideoRoot = "D:\Học\KL\Data\YouCookII\YouCookII\videos" }
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\videos"))
+    if (Test-Path $candidate) { $VideoRoot = $candidate } else { $VideoRoot = "D:\Học\KL\Data\YouCookII\videos" }
 }
 if (-not $AudioRoot) {
-    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\YouCookII\audio"))
-    if (Test-Path $candidate) { $AudioRoot = $candidate } else { $AudioRoot = "D:\Học\KL\Data\YouCookII\YouCookII\audio" }
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\..\..\Data\YouCookII\audio"))
+    if (Test-Path $candidate) { $AudioRoot = $candidate } else { $AudioRoot = "D:\Học\KL\Data\YouCookII\audio" }
 }
 if (-not $LoraCkpt) {
     $candidate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\adapters\omniretriever-7b"))

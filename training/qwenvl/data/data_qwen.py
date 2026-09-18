@@ -53,6 +53,13 @@ if __name__ == "__main__":
 
 from qwenvl.train.utils import IGNORE_INDEX, IMAGE_TOKEN_INDEX, VIDEO_TOKEN_INDEX, PAD_TOKEN_ID, DEFAULT_IMAGE_TOKEN, DEFAULT_VIDEO_TOKEN, DEFAULT_AUDIO_TOKEN
 
+# The event audio cutter and the fixed-duration crop live in the inference
+# package so training and inference cut an event's audio identically.
+_SRC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "src")
+if os.path.isdir(_SRC_ROOT) and os.path.abspath(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, os.path.abspath(_SRC_ROOT))
+from omniretriever.data.media import fit_waveform, load_audio_segment
+
 def is_rank_zero():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         return torch.distributed.get_rank() == 0
@@ -407,6 +414,11 @@ class LazySupervisedDataset(Dataset):
             target_frames = min(max(num_frames_to_sample, video_min_frames), video_max_frames)
             start_idx = round(timestamps[0] * vr.get_avg_fps())
             end_idx = min(round(timestamps[1] * vr.get_avg_fps()), total_frame_num - 1)
+            if video_length <= 0 or start_idx > end_idx:
+                # The event starts after the file ends (a truncated download);
+                # linspace would run backwards into out-of-bound indices.
+                raise ValueError(f"Event {timestamps} lies past the end of {video_file} "
+                                 f"({total_frame_num / vr.get_avg_fps():.1f}s)")
             frame_idx = np.linspace(start_idx, end_idx, target_frames, dtype=int)
 
         video = vr.get_batch(frame_idx).asnumpy()
@@ -454,6 +466,11 @@ class LazySupervisedDataset(Dataset):
 
             start_idx = round(timestamps[0] * vr.get_avg_fps())
             end_idx = min(round(timestamps[1] * vr.get_avg_fps()), total_frame_num - 1)
+            if video_length <= 0 or start_idx > end_idx:
+                # The event starts after the file ends (a truncated download);
+                # linspace would run backwards into out-of-bound indices.
+                raise ValueError(f"Event {timestamps} lies past the end of {video_file} "
+                                 f"({total_frame_num / vr.get_avg_fps():.1f}s)")
             frame_idx = np.linspace(start_idx, end_idx, target_frames, dtype=int)
 
         video = vr.get_batch(frame_idx).asnumpy() # video: (F, H, W, C)
@@ -662,6 +679,7 @@ class LazySupervisedDataset(Dataset):
             audio = None
             audio_lengths = None
             raw_wav = None
+            video_file = None
 
             if "image" in sources[0]:
                 image_file = resolve_media_path(
@@ -755,21 +773,32 @@ class LazySupervisedDataset(Dataset):
                     target_len = int(max(fixed_audio_duration, 1) * 16000)
                     silence = np.zeros(target_len, dtype=np.float32)
                     audio, audio_lengths, raw_wav = self.process_audio(audio_wav=silence)
-                # Truncate/pad raw_wav to fixed length for consistent batching
-                if fixed_audio_duration > 0 and raw_wav is not None:
-                    target_len = int(fixed_audio_duration * 16000)
-                    if len(raw_wav[0]) > target_len:
-                        raw_wav[0] = raw_wav[0][:target_len]
-                    elif len(raw_wav[0]) < target_len:
-                        sil = np.zeros(target_len - len(raw_wav[0]), dtype=raw_wav[0].dtype)
-                        raw_wav[0] = np.concatenate((raw_wav[0], sil), axis=0)
-                    # Reprocess audio with fixed length for consistent audio_lengths
-                    audio, audio_lengths, raw_wav = self.process_audio(audio_wav=raw_wav[0])
+            elif isinstance(video_file, str) and "video" in sources[0]:
+                # Video-only record: the event's audio is cut out of the same
+                # video over the same [start, end] window as its frames.
+                timestamps = sources[0].get("timestamps", None)
+                try:
+                    event_wav = load_audio_segment(video_file, *(timestamps or (None, None)))
+                    audio, audio_lengths, raw_wav = self.process_audio(audio_wav=event_wav)
+                except Exception as e:
+                    rank0_print(f"[audio] cannot cut audio from {video_file} {timestamps}: {e} -- using silence.")
+                    target_len = int(max(fixed_audio_duration, 1) * 16000)
+                    silence = np.zeros(target_len, dtype=np.float32)
+                    audio, audio_lengths, raw_wav = self.process_audio(audio_wav=silence)
             elif "video" in sources[0] and getattr(self.data_args, 'use_beats', False):
                 # For samples without audio but with video, generate silence
                 target_len = int(max(fixed_audio_duration, 1) * 16000)
                 silence = np.zeros(target_len, dtype=np.float32)
                 audio, audio_lengths, raw_wav = self.process_audio(audio_wav=silence)
+
+            # Crop/pad to a fixed length for consistent batching. Centre crop,
+            # the same fit_waveform the inference loader applies.
+            if fixed_audio_duration > 0 and raw_wav is not None:
+                target_len = int(fixed_audio_duration * 16000)
+                if len(raw_wav) != 1 or len(raw_wav[0]) != target_len:
+                    # Reprocess audio with fixed length for consistent audio_lengths
+                    audio, audio_lengths, raw_wav = self.process_audio(
+                        audio_wav=fit_waveform(raw_wav[0], target_len))
 
             if raw_wav is not None and len(raw_wav[0]) < 16000: # pad audio to at least 1s
                 sil = np.zeros(16000 - len(raw_wav[0]), dtype=float)
