@@ -58,11 +58,18 @@ from omniretriever.evaluation.score import cosine_similarity
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate OmniRetriever on YouCookII val_omni.jsonl")
-    parser.add_argument("--base-model", type=str, default="D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")
-    parser.add_argument("--beats-path", type=str, default="D:/Học/KL/Code/Omni/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt")
-    parser.add_argument("--adapter", type=str, default="D:/Học/KL/Code/Omni/adapters/omniretriever-7b")
+    # Defaults follow the same env vars as training/train.sh (set once in the Colab
+    # cell), falling back to the local Windows layout.
+    env = os.environ.get
+    parser.add_argument("--base-model", type=str,
+                        default=env("WAVE_PATH", "D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B"))
+    parser.add_argument("--beats-path", type=str,
+                        default=env("BEATS_PATH", "D:/Học/KL/Code/Omni/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"))
+    parser.add_argument("--adapter", type=str,
+                        default=env("LORA_CKPT", "D:/Học/KL/Code/Omni/adapters/omniretriever-7b"))
     parser.add_argument("--val-manifest", type=str, default="D:/Học/KL/Data/YouCookII/metadata/val_omni_video.jsonl")
-    parser.add_argument("--video-root", type=str, default="D:/Học/KL/Data/YouCookII/videos")
+    parser.add_argument("--video-root", type=str,
+                        default=env("VIDEO_ROOT", "D:/Học/KL/Data/YouCookII/videos"))
     parser.add_argument("--audio-root", type=str, default="D:/Học/KL/Data/YouCookII/audio",
                         help="Only read for manifest records that carry an 'audio' field; "
                              "video-only records cut their audio out of the video.")
@@ -106,6 +113,16 @@ class MockDataArgs:
 
 def main():
     args = parse_args()
+    # Fail before the 7B load, not after: a missing BEATs checkpoint used to be
+    # skipped silently, leaving the audio branch un-initialised and the scores
+    # quietly wrong.
+    for flag, path in (("--base-model", args.base_model), ("--beats-path", args.beats_path),
+                       ("--val-manifest", args.val_manifest), ("--video-root", args.video_root)):
+        if not os.path.exists(path):
+            sys.exit(f"[ERROR] {flag} does not exist: {path}")
+    if args.adapter and args.adapter != "No" and not os.path.isfile(
+            os.path.join(args.adapter, "adapter_model.safetensors")):
+        sys.exit(f"[ERROR] --adapter has no adapter_model.safetensors: {args.adapter}")
     os.environ["VIDEO_ROOT"] = args.video_root
     os.environ["AUDIO_ROOT"] = args.audio_root
     os.environ["BEATS_PATH"] = args.beats_path

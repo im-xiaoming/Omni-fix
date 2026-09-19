@@ -37,7 +37,20 @@ from torch.utils.data import Dataset
 from PIL import Image, ImageOps
 # from torchcodec.decoders import VideoDecoder, AudioDecoder
 from decord import VideoReader, cpu
+import decord
 import soundfile as sf
+
+# FFmpeg's h264 decoder logs "[h264 @ 0x...] mmco: unref short failure" at error
+# level for many YouTube encodes (non-conforming reference-picture marking), most
+# often when decord seeks into the middle of a video to reach an event window.
+# The frames still decode, and a genuine decode failure raises in Python and is
+# handled by __getitem__, so the log line is noise -- dozens per step in the
+# training log. Set FFMPEG_VERBOSE=1 to see FFmpeg's messages again.
+if os.environ.get("FFMPEG_VERBOSE", "0") != "1":
+    try:
+        decord.logging.set_level(decord.logging.QUIET)
+    except AttributeError:  # decord build without the logging module
+        pass
 import librosa
 try:
     import ffmpeg

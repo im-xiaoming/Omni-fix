@@ -206,10 +206,17 @@ os.environ.update({
     'LORA_CKPT':  '/content/adapters/omniretriever-7b',
     # Ghi checkpoint thẳng lên Drive để không mất khi Colab ngắt phiên.
     'OUTPUT_DIR': '/content/drive/MyDrive/omniretriever/youcookii_ft',
-    'LORA_ONLY':  'False',   # False: LoRA + classify_linear + beats_ln + beats_proj | True: chỉ LoRA
-    'BATCH_SIZE': '8', 'GRAD_ACCUM': '1', 'EPOCHS': '1', 'LR': '1e-4',
+    'LORA_ONLY':  'True',    # True: chỉ LoRA | False: LoRA + classify_linear + beats_ln + beats_proj
+    'BATCH_SIZE': '8', 'GRAD_ACCUM': '1', 'EPOCHS': '3', 'LR': '1e-4',
+    'LORA_INIT_ONLY': 'True',  # lần chạy đầu: khởi tạo từ adapter gốc; resume sau khi ngắt phiên: 'False'
 })
+VAL = f'{DRIVE_DATA}/metadata/val_omni_video.jsonl'
+RES = '/content/drive/MyDrive/omniretriever/eval'   # kết quả eval (JSON) của zero-shot và từng epoch
+os.makedirs(RES, exist_ok=True)
 ```
+
+Cấu hình trên là fine-tune **LoRA-only**: LR `1e-4` hợp với việc chỉ train 6.9M tham số LoRA trên khoảng 1–3k bước
+(LR 1e-5 của bài báo dành cho 395M tham số và 11k bước), 3 epoch, lưu mỗi epoch để chọn epoch tốt nhất.
 
 **Cell 4 — Kiểm tra dữ liệu trước khi train (không nạp model)**
 
@@ -221,18 +228,72 @@ os.environ.update({
 !python scripts/test_pipeline.py
 ```
 
-**Cell 5 — Train**
+**Cell 5 — Chấm zero-shot (mốc so sánh, chạy TRƯỚC khi train)**
+
+Adapter gốc, chưa fine-tune, trên toàn bộ 3,030 event val. Bài báo không có số YouCook, và mô hình của họ được đánh
+giá zero-shot; đây là mốc mà mọi checkpoint fine-tune phải vượt. Chạy thử `--max-samples 50` trước để bắt lỗi đường
+dẫn, rồi chạy đủ (batch 1, không tăng: fusion head lấy vector ở token cuối cố định nên padding làm đổi embedding).
 
 ```python
-!bash training/train.sh --temperature 0.05 --save_steps 200 --save_total_limit 2
+%cd /content/code/Omni-fix
+# --base-model / --beats-path / --video-root lấy từ biến môi trường ở cell 3.
+!python scripts/eval_youcookii.py --adapter /content/adapters/omniretriever-7b \
+    --val-manifest "{VAL}" --output "{RES}/zeroshot.json" --save-embeds "{RES}/zeroshot.npz"
 ```
+
+**Cell 6 — Train**
+
+```python
+!bash training/train.sh --adam_beta2 0.95 --save_strategy epoch --save_total_limit 3
+```
+
+Không truyền `--temperature`: mặc định 0.01, đúng giá trị adapter gốc đã được train. Mỗi epoch là 1,070 bước
+(8,560 event / batch 8), nên checkpoint có tên `checkpoint-1070`, `checkpoint-2140`, `checkpoint-3210`.
+
+**Cell 7 — Chấm từng epoch và so với zero-shot**
+
+Train và eval không chạy song song được trên cùng một GPU (mỗi bên nạp một model 7B). Chạy cell này sau khi train
+xong, hoặc ở phiên Colab sau: checkpoint nằm trên Drive, cell bỏ qua các checkpoint đã chấm.
+
+```python
+import glob, json
+ckpts = sorted(glob.glob(f"{os.environ['OUTPUT_DIR']}/checkpoint-*"), key=lambda p: int(p.rsplit('-', 1)[1]))
+for ck in ckpts:
+    out = f"{RES}/{os.path.basename(ck)}.json"
+    if not os.path.exists(out):
+        !python scripts/eval_youcookii.py --adapter "{ck}" --val-manifest "{VAL}" --output "{out}"
+
+def scores(path):
+    r = json.load(open(path))
+    return r['text_to_multimodal (t2m)'], r['multimodal_to_text (m2t)']
+
+zs_t2m, zs_m2t = scores(f'{RES}/zeroshot.json')
+M = ('R@1', 'R@5', 'R@10', 'MRR')
+print(f"{'':18}" + ''.join(f'{d + " " + m:>16}' for d in ('t2m', 'm2t') for m in M))
+print(f"{'zero-shot':18}" + ''.join(f'{s[m]:>16.2f}' for s in (zs_t2m, zs_m2t) for m in M))
+for ck in ckpts:
+    out = f"{RES}/{os.path.basename(ck)}.json"
+    if os.path.exists(out):
+        t2m, m2t = scores(out)
+        print(f'{os.path.basename(ck):18}' + ''.join(
+            f'{s[m]:.2f} ({s[m] - z[m]:+.2f})'.rjust(16)
+            for s, z in ((t2m, zs_t2m), (m2t, zs_m2t)) for m in M))
+```
+
+Chọn checkpoint theo R@1 (hai chiều t2m và m2t), số trong ngoặc là chênh lệch so với zero-shot:
+* Epoch 1 tốt nhất rồi giảm → bắt đầu overfit: lấy epoch 1 (muốn thử thêm thì chạy lại với `LR=5e-5`).
+* Vẫn tăng tới epoch cuối → train thêm: `LORA_INIT_ONLY=False`, tăng `EPOCHS` rồi chạy lại cell 6.
+* Ngay epoch 1 đã thấp hơn zero-shot → LR quá cao: chạy lại với `LR=5e-5` hoặc `2e-5` (xóa `OUTPUT_DIR` cũ trước).
+
+> Chọn epoch trên val rồi báo cáo luôn trên val cho số hơi lạc quan. Để chặt chẽ, tách khoảng 10% video của tập train
+> làm dev để chọn epoch/LR, và chỉ chấm val một lần cho checkpoint cuối.
 
 Ngay sau bước `[5/5] Configuring model adapters / LoRA...`, xem mục **Trainable parameters by group** trong
 `TRAINABLE PARAMETER REPORT`: với `LORA_ONLY=False` phải có `LoRA 6,881,280`, `classify_linear 372,513,792`,
 `beats_proj 15,604,736`, `beats_ln 1,536`; với `LORA_ONLY=True` chỉ có dòng `LoRA`. Nếu OOM, đặt
 `BATCH_SIZE=4`, `GRAD_ACCUM=2` rồi chạy lại.
 
-Phiên Colab bị ngắt thì chạy lại cell 3 và 5: có `checkpoint-*` trong `OUTPUT_DIR` là script tự resume, trừ khi
+Phiên Colab bị ngắt thì chạy lại cell 3 và 6: có `checkpoint-*` trong `OUTPUT_DIR` là script tự resume, trừ khi
 `LORA_INIT_ONLY=True` (mặc định của `train.sh`) — khi đó đặt `LORA_INIT_ONLY=False` để resume từ checkpoint cục bộ.
 
 **Sau khi train:** chấm checkpoint bằng notebook `Omni_inference.ipynb`. Cell 6 của notebook kiểm tra checkpoint có đủ
