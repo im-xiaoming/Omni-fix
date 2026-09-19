@@ -16,7 +16,13 @@
 #   GRAD_ACCUM       gradient accumulation steps        (default: 8)
 #   LR               learning rate                      (default: 1e-5)
 #   LORA_R           LoRA rank                          (default: 16)
-#   LORA_ALPHA       LoRA alpha                         (default: 32)
+#   LORA_ALPHA       LoRA alpha                         (default: 32). Both are ignored when
+#                    LORA_CKPT is set: the adapter's own adapter_config.json wins.
+#   LORA_ONLY        what is trained on top of LORA_CKPT (default: False):
+#                      False -> LoRA (q/k/v of all 28 LLM layers) + classify_linear
+#                               + beats_ln + beats_proj
+#                      True  -> LoRA only; the three heads keep the adapter's weights
+#                    Everything else (LLM, ViT, Whisper, BEATs encoder) is always frozen.
 #   VIDEO_BLACKLIST  optional path to a one-id-per-line blacklist file
 #
 # Media root dirs (optional – only needed when JSONL contains bare filenames):

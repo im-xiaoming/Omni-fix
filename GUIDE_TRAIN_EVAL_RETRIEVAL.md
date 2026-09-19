@@ -80,12 +80,26 @@ thật của vài event: `WAVE_PATH=... DATA_PATH=... VIDEO_ROOT=... python scri
 ## 1. Giai đoạn 1: Huấn luyện (Fine-tuning)
 
 ### Cơ chế đóng băng mô hình (Freezing & Unfreezing)
-* **Đóng băng 100% Backbone**: Toàn bộ 7 tỷ tham số của LLM Qwen2.5, Vision Tower (ViT), Audio Tower (Whisper) và BEATs Transformer đều được khóa cứng (`requires_grad = False`).
-* **Chỉ mở các lớp thích nghi**:
-  1. Các ma trận LoRA ($r=16, \alpha=32$) ở các lớp Attention `(q|k|v)_proj`.
-  2. Lớp phân loại chiếu đa phương thức `model.classify_linear` (chiếu sang 3584-dim).
-  3. Lớp chiếu âm thanh BEATs `model.beats_proj` và `model.beats_ln`.
-* Tổng số tham số huấn luyện chỉ chiếm **~0.5% - 1%**, giúp tiết kiệm VRAM và giữ nguyên tri thức gốc.
+* **Luôn đóng băng**: LLM Qwen2.5 (kể cả `lm_head`, embedding), Vision Tower (ViT) + merger, Audio Tower (Whisper), BEATs encoder.
+* **Phần được train** do biến `LORA_ONLY` quyết định (fine-tune tiếp từ adapter `omniretriever-7b`):
+
+| Module | `LORA_ONLY=False` (mặc định) | `LORA_ONLY=True` | Số tham số |
+| :-- | :-- | :-- | --: |
+| LoRA `q/k/v_proj`, 28 layer LLM (r=16, α=32 lấy từ `adapter_config.json` của adapter) | train | train | 6,881,280 |
+| `classify_linear` — fusion head all-layer: Linear(28×3584→3584) → GELU → Linear(3584→3584) | train | giữ trọng số adapter | 372,513,792 |
+| `beats_proj` — Linear(768→3584) → GELU → Linear(3584→3584) | train | giữ trọng số adapter | 15,604,736 |
+| `beats_ln` — LayerNorm(768) | train | giữ trọng số adapter | 1,536 |
+| **Tổng trainable** | **395,001,344 (4.03%)** | **6,881,280 (0.07%)** | |
+
+* Ba head được train qua bản sao `modules_to_save` của peft: đó là bản mà forward dùng và `save_pretrained` ghi vào
+  `adapter_model.safetensors`, nên checkpoint tự mang theo head đã fine-tune.
+* `LORA_ONLY=False` tốn thêm khoảng **5 GiB VRAM** (trạng thái AdamW fp32 + gradient của ~388M tham số head). Nếu Colab
+  báo OOM, giảm `BATCH_SIZE` và tăng `GRAD_ACCUM` để giữ nguyên batch hiệu dụng.
+* Khi bắt đầu train, log in bảng `TRAINABLE PARAMETER REPORT`, cuối bảng có mục **Trainable parameters by group** —
+  kiểm tra ở đây rằng các nhóm `LoRA`, `classify_linear`, `beats_proj`, `beats_ln` khớp với bảng trên.
+
+> Trước bản sửa này, `LORA_ONLY=False` vẫn chỉ train LoRA: trên `PeftModel`, `model.model` trỏ tới cả Thinker nên
+> `set_model` đóng băng luôn ba head. Checkpoint train trước bản sửa (ví dụ `checkpoint-1102`) có head y hệt adapter gốc.
 
 ---
 
@@ -144,6 +158,86 @@ export GRADIENT_CHECKPOINTING="True"
 
 bash training/train.sh
 ```
+
+---
+
+### C. Chạy trên Google Colab
+
+Máy local không nạp được model, nên fine-tune chạy trên Colab (GPU A100). Đường dẫn dưới đây khớp với lần chạy trước
+(`log.md`); sửa `DRIVE_DATA` nếu dữ liệu của bạn nằm chỗ khác.
+
+**Chuẩn bị ở máy local (một lần):**
+1. Sinh manifest chỉ-video (mục 0.1) rồi upload `train_omni_video.jsonl`, `val_omni_video.jsonl` lên
+   `.../YouCookII/metadata/` trên Drive. Thư mục `videos/` trên Drive giữ nguyên; **không cần** thư mục `audio/`.
+2. Push code đã sửa lên GitHub để Colab clone về.
+
+**Cell 1 — Drive, code, thư viện**
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+
+!git clone -q https://github.com/im-xiaoming/Omni-fix.git /content/code/Omni-fix
+# av là BẮT BUỘC: audio của mỗi event được cắt từ video bằng PyAV (load_audio_segment).
+!pip install -q deepspeed peft accelerate librosa soundfile av einops
+```
+
+**Cell 2 — Trọng số WAVE-7B + BEATs và adapter gốc**
+
+```python
+!hf download nguyenminh04/omni-model --local-dir /content/WAVE_HOME --quiet
+!hf download YunzeLiu/OmniRetriever-7B --local-dir /content/adapters/omniretriever-7b --quiet
+```
+
+Cấu trúc sau khi tải phải giống `architecture/WAVE_HOME.txt` và `architecture/adapters.txt`:
+`/content/WAVE_HOME/WAVE-7B/`, `/content/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt`,
+`/content/adapters/omniretriever-7b/adapter_model.safetensors`.
+
+**Cell 3 — Biến môi trường**
+
+```python
+import os
+DRIVE_DATA = '/content/drive/MyDrive/Colab Notebooks/code KL/Omni/data/YouCookII'
+os.environ.update({
+    'WAVE_PATH':  '/content/WAVE_HOME/WAVE-7B/',
+    'BEATS_PATH': '/content/WAVE_HOME/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt',
+    'DATA_PATH':  f'{DRIVE_DATA}/metadata/train_omni_video.jsonl',
+    'VIDEO_ROOT': f'{DRIVE_DATA}/videos',
+    'LORA_CKPT':  '/content/adapters/omniretriever-7b',
+    # Ghi checkpoint thẳng lên Drive để không mất khi Colab ngắt phiên.
+    'OUTPUT_DIR': '/content/drive/MyDrive/omniretriever/youcookii_ft',
+    'LORA_ONLY':  'False',   # False: LoRA + classify_linear + beats_ln + beats_proj | True: chỉ LoRA
+    'BATCH_SIZE': '8', 'GRAD_ACCUM': '1', 'EPOCHS': '1', 'LR': '1e-4',
+})
+```
+
+**Cell 4 — Kiểm tra dữ liệu trước khi train (không nạp model)**
+
+```python
+%cd /content/code/Omni-fix
+# Coverage phải là 100%: mọi event cắt được audio từ video của nó.
+!python scripts/check_tuple_data.py "$DATA_PATH" --batch-size 8 --grad-accum 1
+# Nạp thử vài event qua đúng dataset của training (chỉ cần processor).
+!python scripts/test_pipeline.py
+```
+
+**Cell 5 — Train**
+
+```python
+!bash training/train.sh --temperature 0.05 --save_steps 200 --save_total_limit 2
+```
+
+Ngay sau bước `[5/5] Configuring model adapters / LoRA...`, xem mục **Trainable parameters by group** trong
+`TRAINABLE PARAMETER REPORT`: với `LORA_ONLY=False` phải có `LoRA 6,881,280`, `classify_linear 372,513,792`,
+`beats_proj 15,604,736`, `beats_ln 1,536`; với `LORA_ONLY=True` chỉ có dòng `LoRA`. Nếu OOM, đặt
+`BATCH_SIZE=4`, `GRAD_ACCUM=2` rồi chạy lại.
+
+Phiên Colab bị ngắt thì chạy lại cell 3 và 5: có `checkpoint-*` trong `OUTPUT_DIR` là script tự resume, trừ khi
+`LORA_INIT_ONLY=True` (mặc định của `train.sh`) — khi đó đặt `LORA_INIT_ONLY=False` để resume từ checkpoint cục bộ.
+
+**Sau khi train:** chấm checkpoint bằng notebook `Omni_inference.ipynb`. Cell 6 của notebook kiểm tra checkpoint có đủ
+`classify_linear`, `beats_ln`, `beats_proj`, và nếu có `/content/adapters/omniretriever-7b` thì in độ lệch của từng head
+so với adapter gốc (khác 0 nghĩa là head đã được fine-tune).
 
 ---
 

@@ -131,47 +131,82 @@ def apply_liger_kernel_to_qwen2_5_vl(
         modeling_qwen2_5_omni.Qwen2MLP = LigerSwiGLUMLP
 
 
+def _is_modules_to_save(module) -> bool:
+    """True for peft's ModulesToSaveWrapper (a head listed in ``modules_to_save``)."""
+    return hasattr(module, "original_module") and hasattr(module, "modules_to_save")
+
+
+def _set_head_trainable(module, name: str, trainable: bool, under_peft: bool) -> None:
+    """Set a head (classify_linear, beats_ln, beats_proj) trainable or frozen.
+
+    Under peft the head is a ModulesToSaveWrapper: the forward pass runs its
+    ``modules_to_save`` copy, and ``save_pretrained`` writes only that copy, so
+    that is the one to train. ``original_module`` is never used and stays frozen.
+    """
+    if _is_modules_to_save(module):
+        module.original_module.requires_grad_(False)
+        module.modules_to_save.requires_grad_(trainable)
+        return
+    if trainable and under_peft:
+        # A plain module under peft trains, but the adapter checkpoint never
+        # stores it: the trained weights would be lost at save time.
+        raise ValueError(
+            f"{name} is not in the adapter's modules_to_save, so its trained weights would "
+            "not be saved. Use an adapter that lists it (the released omniretriever-7b "
+            "does), or start a fresh LoRA with --lora_ckpt No."
+        )
+    module.requires_grad_(trainable)
+
+
 def set_model(model_args, model):
-    if model_args.train_classify:
-        model.classify_linear.requires_grad_(True)
-    if model_args.use_beats:
-        if model_args.tune_beats_proj:
-            model.beats_ln.requires_grad_(True)
-            model.beats_proj.requires_grad_(True)
-        else:
-            model.beats_ln.requires_grad_(False)
-            model.beats_proj.requires_grad_(False)
+    # Once the pretrained adapter is loaded, ``model`` is a PeftModel, and
+    # PeftModel forwards unknown attributes down to the wrapped Thinker. There
+    # ``model.model`` resolves to the *whole* Thinker rather than its LLM, so
+    # freezing it froze classify_linear / beats_ln / beats_proj as well -- and
+    # only parameters named "lora" were switched back on afterwards. Resolve the
+    # Thinker explicitly so every call below touches the module it names.
+    under_peft = isinstance(model, PeftModel)
+    thinker = model.get_base_model() if under_peft else model
 
     if model_args.tune_mm_vision:
-        model.visual.requires_grad_(True)
+        thinker.visual.requires_grad_(True)
     else:
-        model.visual.requires_grad_(False)
+        thinker.visual.requires_grad_(False)
 
     if model_args.tune_mm_mlp:
-        model.visual.merger.requires_grad_(True)
+        thinker.visual.merger.requires_grad_(True)
     else:
-        model.visual.merger.requires_grad_(False)
+        thinker.visual.merger.requires_grad_(False)
 
     if model_args.tune_mm_audio:
-        model.audio_tower.requires_grad_(True)
+        thinker.audio_tower.requires_grad_(True)
     else:
-        model.audio_tower.requires_grad_(False)
+        thinker.audio_tower.requires_grad_(False)
 
     if model_args.tune_mm_qformer:
-        model.audio_tower.ln_post.requires_grad_(True)
-        model.audio_tower.proj.requires_grad_(True)
+        thinker.audio_tower.ln_post.requires_grad_(True)
+        thinker.audio_tower.proj.requires_grad_(True)
     else:
-        model.audio_tower.ln_post.requires_grad_(False)
-        model.audio_tower.proj.requires_grad_(False)
+        thinker.audio_tower.ln_post.requires_grad_(False)
+        thinker.audio_tower.proj.requires_grad_(False)
 
     if model_args.tune_mm_llm:
         if model_args.use_lora:
             raise Exception("tune_mm_llm is not supported when use_lora is True")
-        model.model.requires_grad_(True)
-        model.lm_head.requires_grad_(True)
+        thinker.model.requires_grad_(True)
+        thinker.lm_head.requires_grad_(True)
     else:
-        model.model.requires_grad_(False)
-        model.lm_head.requires_grad_(False)
+        # The LLM only. Its LoRA matrices are frozen here too and switched back
+        # on by name in train().
+        thinker.model.requires_grad_(False)
+        thinker.lm_head.requires_grad_(False)
+
+    # Heads last, so nothing above can re-freeze them.
+    if model_args.train_classify:
+        _set_head_trainable(thinker.classify_linear, "classify_linear", True, under_peft)
+    if model_args.use_beats:
+        for name in ("beats_ln", "beats_proj"):
+            _set_head_trainable(getattr(thinker, name), name, model_args.tune_beats_proj, under_peft)
 
 def train(attn_implementation="flash_attention_2"):
     global local_rank
@@ -307,6 +342,13 @@ def train(attn_implementation="flash_attention_2"):
             if "lora" in k:
                 v.requires_grad_(True)
 
+        # A head wrapped by get_peft_model above was set trainable before it was
+        # wrapped, so its unused original_module is still trainable. Keep only
+        # the modules_to_save copy that forward uses and the adapter stores.
+        for module in model.modules():
+            if _is_modules_to_save(module):
+                module.original_module.requires_grad_(False)
+
         # ── LoRA-only mode ─────────────────────────────────────────────────
         # Re-freeze everything except lora_A / lora_B so that classify_linear,
         # beats_ln and beats_proj (restored from the pretrained adapter above)
@@ -374,6 +416,19 @@ def train(attn_implementation="flash_attention_2"):
                     print(f"    {name}  {list(p.shape)}", flush=True)
                     trainable_cnt += 1
             print(f"  (Total trainable tensors: {trainable_cnt})", flush=True)
+            print("-" * 70, flush=True)
+            print("  Trainable parameters by group:", flush=True)
+            by_group = {}
+            for name, p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if "lora_" in name:
+                    group = "LoRA"
+                else:
+                    group = next((h for h in ("classify_linear", "beats_ln", "beats_proj") if h in name), "other")
+                by_group[group] = by_group.get(group, 0) + p.numel()
+            for group, count in by_group.items():
+                print(f"    {group:<16} {count:>14,}", flush=True)
             print("=" * 70 + "\n", flush=True)
         
         class LossProgressCallback(TrainerCallback):
