@@ -180,7 +180,14 @@ class OmniRetriever:
         backbone = PeftModel.from_pretrained(backbone, str(adapter))
         backbone = backbone.to(device).eval()
 
-        processor = AutoProcessor.from_pretrained(str(base_model), trust_remote_code=True)
+        # WAVE-7B ships no processor_config.json, so AutoProcessor falls back to a bare
+        # Qwen2TokenizerFast; the encode_* helpers need the full Omni processor.
+        try:
+            from transformers import Qwen2_5OmniProcessor
+
+            processor = Qwen2_5OmniProcessor.from_pretrained(str(base_model))
+        except Exception:
+            processor = AutoProcessor.from_pretrained(str(base_model), trust_remote_code=True)
 
         return cls(backbone=backbone, processor=processor, config=config)
 

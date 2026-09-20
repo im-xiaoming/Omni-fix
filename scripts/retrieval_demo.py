@@ -39,10 +39,16 @@ from omniretriever import OmniRetriever
 
 
 def parse_args():
+    # Defaults follow the same env vars as training/train.sh and eval_youcookii.py
+    # (set once in the Colab cell), falling back to the local Windows layout.
+    env = os.environ.get
     parser = argparse.ArgumentParser(description="Multimodal Retrieval Demo")
-    parser.add_argument("--base-model", type=str, default="D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B")
-    parser.add_argument("--adapter", type=str, default="D:/Học/KL/Code/Omni/adapters/omniretriever-7b")
-    parser.add_argument("--val-manifest", type=str, default="D:/Học/KL/Data/YouCookII/metadata/val_omni_video.jsonl")
+    parser.add_argument("--base-model", type=str,
+                        default=env("WAVE_PATH", "D:/Học/KL/Code/Omni/WAVE_HOME/WAVE-7B"))
+    parser.add_argument("--adapter", type=str,
+                        default=env("LORA_CKPT", "D:/Học/KL/Code/Omni/adapters/omniretriever-7b"))
+    parser.add_argument("--val-manifest", type=str,
+                        default=env("VAL_MANIFEST", "D:/Học/KL/Data/YouCookII/metadata/val_omni_video.jsonl"))
     parser.add_argument("--gallery-embeds", type=str, default="output/val_embeds.npz", help="Precomputed gallery embeddings from eval_youcookii.py")
     parser.add_argument("--query", type=str, default=None, help="Text query to search for videos")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results to return")
@@ -102,6 +108,12 @@ def search_text_to_video(query_text, model, gallery_embeds, records, top_k=5):
 
 def main():
     args = parse_args()
+
+    # load_wave_backbone resolves the BEATs checkpoint under WAVE_HOME; derive it
+    # from BEATS_PATH so the same Colab env cell covers this script too.
+    if not os.environ.get("WAVE_HOME") and os.environ.get("BEATS_PATH"):
+        os.environ["WAVE_HOME"] = str(Path(os.environ["BEATS_PATH"]).parent)
+
     gallery_embeds, records = load_gallery(args.gallery_embeds, args.val_manifest)
 
     print(f"[+] Loading OmniRetriever model...")
