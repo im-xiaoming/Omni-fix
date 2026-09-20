@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -160,7 +161,6 @@ class OmniRetriever:
         # Local imports avoid a heavy import-time dependency on transformers / peft
         # for users who only need the metrics module.
         from peft import PeftModel
-        from transformers import AutoProcessor
 
         from omniretriever.models.wave import load_wave_backbone
 
@@ -180,14 +180,12 @@ class OmniRetriever:
         backbone = PeftModel.from_pretrained(backbone, str(adapter))
         backbone = backbone.to(device).eval()
 
-        # WAVE-7B ships no processor_config.json, so AutoProcessor falls back to a bare
-        # Qwen2TokenizerFast; the encode_* helpers need the full Omni processor.
-        try:
-            from transformers import Qwen2_5OmniProcessor
-
-            processor = Qwen2_5OmniProcessor.from_pretrained(str(base_model))
-        except Exception:
-            processor = AutoProcessor.from_pretrained(str(base_model), trust_remote_code=True)
+        # WAVE-7B ships no processor_config.json, so AutoProcessor falls back to a
+        # bare Qwen2TokenizerFast and the encode_* helpers break on
+        # ``processor.tokenizer``. Use the vendored Omni processor that
+        # scripts/eval_youcookii.py loads, so queries are encoded exactly like the
+        # gallery embeddings they are scored against.
+        processor = _load_omni_processor(base_model)
 
         return cls(backbone=backbone, processor=processor, config=config)
 
@@ -317,3 +315,30 @@ def _resolve_dtype(name: str) -> torch.dtype:
     if name not in mapping:
         raise ValueError(f"Unsupported dtype: {name!r}; expected one of {sorted(mapping)}.")
     return mapping[name]
+
+
+def _load_omni_processor(base_model: str | os.PathLike):
+    """Return the Omni processor for ``base_model``.
+
+    ``AutoProcessor`` resolves a WAVE-7B directory to a bare ``Qwen2TokenizerFast``
+    (the checkpoint carries no ``processor_config.json``), which has no
+    ``.tokenizer`` and no image/video branches. The real processor is the one
+    vendored under ``training/qwenvl`` -- the same class
+    ``scripts/eval_youcookii.py`` uses to build the gallery embeddings.
+    """
+    training_dir = Path(__file__).resolve().parents[3] / "training"
+    if training_dir.is_dir() and str(training_dir) not in sys.path:
+        sys.path.insert(0, str(training_dir))
+
+    try:
+        from qwenvl.data.processing_qwen2_5_omni import Qwen2_5OmniProcessor
+    except ImportError:
+        try:
+            from transformers import Qwen2_5OmniProcessor  # type: ignore[attr-defined]
+        except ImportError as exc:
+            raise ImportError(
+                "Could not import Qwen2_5OmniProcessor. Expected it under "
+                f"{training_dir}/qwenvl/data/processing_qwen2_5_omni.py or in transformers."
+            ) from exc
+
+    return Qwen2_5OmniProcessor.from_pretrained(str(base_model))
