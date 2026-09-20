@@ -193,12 +193,20 @@ def main():
     mllm_embeds_list = []
     ids_list = []
 
+    # DataCollatorForOmniDataset drops the manifest "id" field, so batch.get("id")
+    # is always empty. Recover the ids positionally instead: shuffle=False keeps
+    # the dataloader in list_data_dict order, and skipped batches are skipped here
+    # too, which keeps ids aligned with the embeddings.
+    manifest_ids = [rec.get("id") for rec in dataset.list_data_dict]
+
     with torch.inference_mode():
-        for batch in tqdm(dataloader, desc="Extracting"):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Extracting")):
             if batch is None:
                 continue
 
-            batch_ids = batch.get("id", [])
+            batch_ids = batch.get("id") or manifest_ids[
+                batch_idx * args.batch_size : (batch_idx + 1) * args.batch_size
+            ]
             ids_list.extend(batch_ids)
 
             # Move inputs to device cleanly without boolean tensor ambiguity

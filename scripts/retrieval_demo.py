@@ -71,15 +71,29 @@ def load_gallery(embeds_path, manifest_path):
     ids = list(blob["ids"]) if "ids" in blob else []
 
     print(f"[+] Loading metadata from {manifest_path}...")
-    metadata_map = {}
+    manifest = []
     with open(manifest_path, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
-                item = json.loads(line)
-                metadata_map[item["id"]] = item
+                manifest.append(json.loads(line))
 
-    records = [metadata_map.get(rec_id, {}) for rec_id in ids]
-    return mllm_embeds, records
+    if ids:
+        by_id = {item["id"]: item for item in manifest}
+        return mllm_embeds, [by_id.get(rec_id, {}) for rec_id in ids]
+
+    # Older .npz files carry an empty "ids" array: the eval collator never emits an
+    # "id" key, so eval_youcookii.py collected nothing. Fall back to manifest order,
+    # which the extraction loop preserves (DataLoader shuffle=False), but only once
+    # the counts agree -- a mismatch means records were dropped and the mapping
+    # would silently label every result with the wrong video.
+    if len(manifest) != len(mllm_embeds):
+        print(f"[-] {embeds_path} carries no ids, and its {len(mllm_embeds)} embeddings "
+              f"do not match the {len(manifest)} manifest records.")
+        print("    Re-run: python scripts/eval_youcookii.py --save-embeds <path>")
+        sys.exit(1)
+
+    print("[!] .npz carries no ids; falling back to manifest order.")
+    return mllm_embeds, manifest
 
 
 def search_text_to_video(query_text, model, gallery_embeds, records, top_k=5):
