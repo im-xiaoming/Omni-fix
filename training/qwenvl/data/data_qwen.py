@@ -1002,7 +1002,8 @@ class LazySupervisedDataset(Dataset):
                 # sample is missing it, so a rare gap here zeroes obj1 for a
                 # whole optimiser step. Name the first one rather than let the
                 # objective quietly read zero for a full run.
-                if not getattr(LazySupervisedDataset, "_tuple_gap_warned", False):
+                if (getattr(self.data_args, 'use_tuple_infonce', False)
+                        and not getattr(LazySupervisedDataset, "_tuple_gap_warned", False)):
                     LazySupervisedDataset._tuple_gap_warned = True
                     rank0_print(
                         f"[TupleInfoNCE] no tuple data for sample {i} "

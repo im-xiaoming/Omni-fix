@@ -120,8 +120,24 @@ class QwenVLTrainer(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.skip_deepspeed_load = skip_deepspeed_load
+        self._consecutive_ooms = 0
         if not hasattr(self, "use_apex"):
             self.use_apex = False
+
+    # A skipped batch still advances global_step and the LR schedule, and logs
+    # loss=0. One rare oversized batch is worth skipping; a run where every batch
+    # OOMs would otherwise burn the whole schedule logging zeros, so stop it.
+    MAX_CONSECUTIVE_OOMS = 3
+
+    def _on_oom(self, where):
+        self._consecutive_ooms += 1
+        logger.warning(f"[OOM] Skipping {where} at step {self.state.global_step} due to CUDA OOM "
+                       f"({self._consecutive_ooms} in a row). Clearing cache.")
+        torch.cuda.empty_cache()
+        if self._consecutive_ooms >= self.MAX_CONSECUTIVE_OOMS:
+            raise RuntimeError(
+                f"CUDA OOM on {self._consecutive_ooms} consecutive batches: the batch does not fit "
+                f"on this GPU. Lower BATCH_SIZE (now {self.args.per_device_train_batch_size}) and rerun.")
 
     def set_initial_training_values(self, args, train_dataloader, total_train_batch_size=None):
         try:
@@ -1049,8 +1065,7 @@ class QwenVLTrainer(Trainer):
             with self.compute_loss_context_manager():
                 loss, obj1_loss, obj2_loss, obj3_loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
         except torch.cuda.OutOfMemoryError:
-            logger.warning(f"[OOM] Skipping batch at step {self.state.global_step} due to CUDA OOM. Clearing cache.")
-            torch.cuda.empty_cache()
+            self._on_oom("batch")
             zero = torch.tensor(0.0, device=self.args.device, requires_grad=True)
             return zero, zero.detach(), zero.detach(), zero.detach()
 
@@ -1107,11 +1122,11 @@ class QwenVLTrainer(Trainer):
             try:
                 self.accelerator.backward(loss, **kwargs)
             except torch.cuda.OutOfMemoryError:
-                logger.warning(f"[OOM] Skipping backward at step {self.state.global_step} due to CUDA OOM. Clearing cache.")
-                torch.cuda.empty_cache()
+                self._on_oom("backward")
                 zero = torch.tensor(0.0, device=self.args.device)
                 return zero, zero, zero, zero
 
+            self._consecutive_ooms = 0
             return loss.detach(), obj1_loss.detach(), obj2_loss.detach(), obj3_loss.detach()
 
 
