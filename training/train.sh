@@ -37,15 +37,17 @@
 #   DATA_PATH=/data/omniretriever_1m.jsonl \
 #   bash training/train.sh
 #
-# Loss components:
-#   L_A (pairwise InfoNCE)        — always on when train_classify=True
-#   L_D (fusion-as-teacher)       — enabled by train_classify=True + classify_type=all_layer
-#                                   (uses the joint forward's anchor as a stop-gradient teacher
-#                                    for the single-modal embeddings; see model forward)
-#   L_T (Tuple-InfoNCE)           — enabled by --use_tuple_infonce True
-#
-# To run the pairwise-only ablation pass USE_TUPLE_INFONCE=False below; for an
-# L_A-only baseline, also set --classify_type single (single-stream classifier).
+# Loss (USE_TUPLE_INFONCE picks exactly one of the two; they never run together):
+#   True  -> Tuple-InfoNCE + fusion-as-teacher (the paper's pre-training recipe).
+#            The anchor is audio+video+CAPTION; text, audio-only and video-only are
+#            pulled towards that detached anchor and towards each other. The
+#            audio+video embedding that retrieval actually ranks (caption absent) is
+#            never in the loss -- it only moves through the shared LoRA.
+#   False -> pairwise symmetric InfoNCE between the audio+video embedding and the
+#            caption embedding: exactly the pair eval_youcookii.py scores. Use this
+#            to fine-tune for text <-> event-clip retrieval (YouCookII / UEMR).
+#   USE_TUPLE_INFONCE=False is also ~3x cheaper per step (2 forwards instead of ~6),
+#   which leaves room for a larger BATCH_SIZE, i.e. more in-batch negatives.
 
 set -euo pipefail
 
